@@ -1,0 +1,20 @@
+{
+  "name": "dndrom",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local-first 3D tabletop with an AI Dungeon Master",
+  "license": "MIT",
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "dev": "pnpm --filter @dndrom/desktop dev",
+    "build": "pnpm --filter @dndrom/desktop build",
+    "preview": "pnpm --filter @dndrom/desktop preview",
+    "test": "pnpm --filter @dndrom/desktop test && pnpm --filter @dndrom/signaling test && cargo test --workspace",
+    "test:web": "pnpm --filter @dndrom/desktop test",
+    "typecheck": "pnpm --filter @dndrom/desktop typecheck",
+    "check": "pnpm typecheck && pnpm test && pnpm build && cargo check --workspace",
+    "desktop:dev": "pnpm --filter @dndrom/desktop tauri dev",
+    "desktop:build": "pnpm --filter @dndrom/desktop tauri build",
+    "signaling": "pnpm --filter @dndrom/signaling start"
+  }
+}

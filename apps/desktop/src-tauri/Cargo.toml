@@ -1,0 +1,21 @@
+[package]
+name = "dndrom-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DnDRom desktop shell"
+
+[lib]
+name = "dndrom_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dndrom-domain = { path = "../../../crates/domain" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+thiserror.workspace = true
+

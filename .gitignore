@@ -1,0 +1,16 @@
+node_modules/
+.pnpm-store/
+dist/
+target/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+coverage/
+playwright-report/
+test-results/
+*.dndrom
+
