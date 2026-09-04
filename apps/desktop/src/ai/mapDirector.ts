@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { ASSET_CATALOG } from "../domain/assets";
 import { generateMapFromPrompt } from "../domain/mapGenerator";
-import type { CampaignSettings, GameMap } from "../domain/types";
+import { createFallbackWorldBlueprints, worldBlueprintSchema, type WorldForgeRequest } from "../domain/worldForge";
+import type { CampaignSettings, GameMap, WorldBlueprintV1 } from "../domain/types";
 import { completeLocalChat, extractJson } from "./openAiClient";
 
 const placementSchema = z.object({
@@ -21,6 +22,46 @@ const planSchema = z.object({
   depth: z.number().int().min(8).max(60),
   placements: z.array(placementSchema).min(1).max(180),
 });
+
+const worldConceptsSchema = z.object({ concepts: z.array(worldBlueprintSchema).length(2) });
+
+export interface BoundedWorldContext {
+  location?: string;
+  biome?: string;
+  sceneTags?: string[];
+  partyFootprints?: number[];
+  recentResolvedEvents?: string[];
+}
+
+export async function generateWorldBlueprints(
+  request: WorldForgeRequest,
+  settings: CampaignSettings,
+  context: BoundedWorldContext = {},
+  signal?: AbortSignal,
+): Promise<{ blueprints: [WorldBlueprintV1, WorldBlueprintV1]; provider: "local-ai" | "procedural"; warning?: string }> {
+  const fallback = createFallbackWorldBlueprints(request);
+  if (!settings.useLocalAiForMaps || !settings.localAiEndpoint.trim()) return { blueprints: fallback, provider: "procedural" };
+  const boundedContext: BoundedWorldContext = {
+    location: context.location?.slice(0, 120), biome: context.biome?.slice(0, 60),
+    sceneTags: context.sceneTags?.slice(0, 12).map((entry) => entry.slice(0, 60)),
+    partyFootprints: context.partyFootprints?.slice(0, 12).map((entry) => Math.max(.25, Math.min(6, entry))),
+    recentResolvedEvents: context.recentResolvedEvents?.slice(0, 5).map((entry) => entry.slice(0, 180)),
+  };
+  try {
+    const result = await completeLocalChat({
+      endpoint: settings.localAiEndpoint, model: settings.localAiModel, signal, temperature: .42, maxTokens: 5_000,
+      messages: [
+        { role: "system", content: `You design deterministic, editable tabletop regions. Return JSON only with {concepts:[WorldBlueprintV1,WorldBlueprintV1]}. Both concepts must use version 1, chunkSize 16, the requested exact dimensions, validated zone connections, and no executable code. Use only these theme values: dungeon,tavern,forest,ruins,cavern,city,town,village,plains,mountains,coast,swamp. Asset requests describe needs and never invent resolved asset IDs. AI controls bounded parameters; procedural code creates geometry. The two concepts must be meaningfully different while remaining playable.` },
+        { role: "user", content: JSON.stringify({ request, boundedContext, fallbackShape: fallback }) },
+      ],
+    });
+    const parsed = worldConceptsSchema.parse(extractJson(result));
+    return { blueprints: parsed.concepts as [WorldBlueprintV1, WorldBlueprintV1], provider: "local-ai" };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return { blueprints: fallback, provider: "procedural", warning: `Local AI blueprint planning failed; deterministic concepts are ready. ${error instanceof Error ? error.message : ""}`.trim() };
+  }
+}
 
 export async function generateAiMap(prompt: string, settings: CampaignSettings, signal?: AbortSignal): Promise<{ map: GameMap; provider: "local-ai" | "procedural"; warning?: string }> {
   if (!settings.useLocalAiForMaps || !settings.localAiEndpoint.trim()) {

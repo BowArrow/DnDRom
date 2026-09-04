@@ -14,7 +14,9 @@
     "typecheck": "pnpm --filter @dndrom/desktop typecheck",
     "check": "pnpm typecheck && pnpm test && pnpm build && cargo check --workspace",
     "desktop:dev": "pnpm --filter @dndrom/desktop tauri dev",
-    "desktop:build": "pnpm --filter @dndrom/desktop tauri build",
+    "desktop:package": "pnpm --filter @dndrom/desktop tauri build",
+    "desktop:build": "pnpm desktop:package && pnpm smoke:packaged",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs",
     "signaling": "pnpm --filter @dndrom/signaling start"
   }
 }

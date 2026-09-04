@@ -1,0 +1,1755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DnDRom — interface kit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* --- Materials: tooled leather and lamplight, not slate --- */
+  --pitch:#100c08; --leather-900:#181109; --leather-800:#20180e; --leather-700:#2a2013;
+  --leather-600:#37291721; --leather-ctl:#372917; --leather-hi:#463420;
+  --rule:#513c22; --rule-soft:#33261619; --rule-in:#332616;
+
+  /* --- Parchment, used as a real surface for anything you'd write on --- */
+  --vellum:#e5d9bb; --vellum-2:#d8c9a4; --vellum-line:#b9a67c; --vellum-ink:#2a1f12; --vellum-dim:#6b5a3f;
+
+  /* --- Text on dark --- */
+  --text:#efe3c6; --text-dim:#b3a181; --text-faint:#7d6b4f;
+
+  /* --- Metals and pigment --- */
+  --brass:#c9a227; --brass-hi:#f3dda0; --brass-lo:#7d5f21; --brass-wash:rgba(201,162,39,.13);
+  --gild:linear-gradient(180deg,#e8ce7a 0%,#c9a227 46%,#9a7519 54%,#d9bb63 100%);
+  --verd:#5f9c72; --verd-wash:rgba(95,156,114,.15);
+  --wax:#9e2f28; --wax-hi:#d4715f; --wax-wash:rgba(158,47,40,.18);
+  --amber:#c8862a; --amber-wash:rgba(200,134,42,.16);
+  --arcane:#8b6fd0; --arcane-soft:#b6a2ec; --arcane-wash:rgba(139,111,208,.16);
+
+  --font-display:"Cinzel","Trajan Pro",Georgia,serif;
+  --font-body:"EB Garamond","Iowan Old Style",Georgia,serif;
+  --font-ui:"EB Garamond",Georgia,serif;
+  --font-mono:"IBM Plex Mono",Consolas,monospace;
+
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:20px;--s6:24px;--s8:32px;--s10:40px;
+  --r-control:2px; --r-card:3px;
+  --shadow-panel:0 14px 38px rgba(0,0,0,.6); --shadow-pop:0 22px 60px rgba(0,0,0,.75);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; color:var(--text); font:400 15px/1.55 var(--font-body);
+  background:
+    radial-gradient(120% 80% at 50% -10%, #241a10 0%, transparent 60%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E"),
+    var(--pitch);
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{font-family:var(--font-display); font-weight:600; margin:0; letter-spacing:.045em}
+a{color:var(--brass)}
+svg{display:block}
+.sprite{display:none}
+
+/* ---------- kit chrome ---------- */
+.kit{display:grid; grid-template-columns:224px minmax(0,1fr); min-height:100vh}
+.kit__nav{
+  position:sticky; top:0; align-self:start; height:100vh; overflow:auto; padding:var(--s5) 0;
+  background:linear-gradient(180deg,#221a10,#181109);
+  border-right:1px solid var(--rule); box-shadow:inset -1px 0 0 rgba(201,162,39,.12);
+}
+.kit__brand{display:flex; gap:11px; align-items:center; padding:0 var(--s5) var(--s4)}
+.kit__brand h1{font-size:19px; color:var(--brass-hi)}
+.kit__brand p{margin:1px 0 0; font-size:12px; color:var(--text-faint); font-style:italic}
+.kit__nav a{
+  display:block; padding:6px var(--s5); color:var(--text-dim); text-decoration:none;
+  font-size:15px; border-left:2px solid transparent;
+}
+.kit__nav a:hover{color:var(--text); background:rgba(201,162,39,.06)}
+.kit__nav a.on{color:var(--brass-hi); border-left-color:var(--brass); background:var(--brass-wash)}
+.kit__navgroup{
+  padding:var(--s4) var(--s5) 4px; font:600 11px/1 var(--font-display); color:var(--brass-lo);
+  letter-spacing:.16em; display:flex; align-items:center; gap:8px;
+}
+.kit__navgroup::after{content:""; flex:1; height:1px; background:linear-gradient(90deg,var(--rule),transparent)}
+.kit__main{padding:var(--s8) var(--s10) 120px; max-width:1200px}
+
+.sec{margin:0 0 var(--s10); scroll-margin-top:var(--s6)}
+.sec__head{margin-bottom:var(--s5); padding-bottom:var(--s3); position:relative}
+.sec__head::after{
+  content:""; position:absolute; left:0; right:0; bottom:0; height:3px;
+  background:
+    linear-gradient(90deg,var(--brass-lo),rgba(125,95,33,.25) 40%,transparent 70%) 0 0/100% 1px no-repeat,
+    linear-gradient(90deg,var(--brass-lo),transparent 30%) 0 2px/100% 1px no-repeat;
+}
+.sec__head h2{font-size:25px; color:var(--brass-hi); display:flex; align-items:center; gap:12px}
+.sec__head h2::after{content:"❦"; font-family:var(--font-body); font-size:15px; color:var(--brass-lo); letter-spacing:0}
+.sec__head p{margin:5px 0 0; font-size:15px; color:var(--text-faint); font-style:italic; max-width:60ch}
+.note{font-size:14.5px; color:var(--text-faint); max-width:70ch; margin:0 0 var(--s4); font-style:italic}
+.row{display:flex; flex-wrap:wrap; gap:var(--s3); align-items:center; margin-bottom:var(--s4)}
+.grid{display:grid; gap:var(--s4)}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media(max-width:1080px){.g3,.g4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:820px){.kit{grid-template-columns:1fr}.kit__nav{display:none}.kit__main{padding:var(--s5)}
+  .g2,.g3,.g4{grid-template-columns:1fr}}
+
+/* ---------- THE FRAME: brass-cornered leather plate ---------- */
+.plate{
+  position:relative; background:
+    linear-gradient(180deg,rgba(201,162,39,.05),transparent 70px), var(--leather-800);
+  border:1px solid var(--rule);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.5), inset 0 1px 0 rgba(201,162,39,.1);
+}
+/* four engraved corner brackets, drawn once as a background */
+.plate::before{
+  content:""; position:absolute; inset:3px; pointer-events:none; z-index:1;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M1 15V6q0-5 5-5h9' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='5.5' cy='5.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M15 15V6q0-5-5-5H1' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='10.5' cy='5.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M1 1v9q0 5 5 5h9' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='5.5' cy='10.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M15 1v9q0 5-5 5H1' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='10.5' cy='10.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E");
+  background-position:left top,right top,left bottom,right bottom;
+  background-repeat:no-repeat;
+}
+.plate--raised{background:linear-gradient(180deg,#2e2314,#241b10)}
+.plate__head{
+  display:flex; align-items:center; gap:var(--s2); justify-content:space-between;
+  padding:11px var(--s4); position:relative;
+}
+.plate__head::after{
+  content:""; position:absolute; left:var(--s4); right:var(--s4); bottom:0; height:1px;
+  background:linear-gradient(90deg,transparent,var(--rule) 12%,var(--rule) 88%,transparent);
+}
+.plate__head h3,.plate__head h4{
+  font-size:14.5px; color:var(--brass-hi); display:flex; align-items:center; gap:9px; letter-spacing:.08em;
+}
+.plate__head h3::before,.plate__head h4::before{
+  content:"◆"; font-family:var(--font-body); font-size:8px; color:var(--brass); letter-spacing:0;
+}
+.plate__body{padding:var(--s4)}
+
+.label{font:400 13px/1 var(--font-body); color:var(--text-faint); margin:0 0 6px; display:block; font-style:italic}
+.mono{font-family:var(--font-mono); font-variant-numeric:tabular-nums}
+.dispname{font-family:var(--font-display); font-size:17px; color:var(--brass-hi); letter-spacing:.05em}
+
+/* ---------- buttons: struck brass ---------- */
+.btn{
+  font:600 13px/1 var(--font-display); letter-spacing:.09em; color:var(--text);
+  background:linear-gradient(180deg,#3d2e1a,#2b2013);
+  border:1px solid var(--rule); border-radius:var(--r-control); padding:9px 15px;
+  display:inline-flex; align-items:center; gap:8px; cursor:pointer; white-space:nowrap;
+  box-shadow:inset 0 1px 0 rgba(201,162,39,.16), 0 1px 2px rgba(0,0,0,.5);
+  transition:background .12s, border-color .12s, color .12s;
+}
+.btn:hover{background:linear-gradient(180deg,#4b3821,#352818); border-color:var(--brass-lo); color:var(--brass-hi)}
+.btn:active{transform:translateY(1px); box-shadow:inset 0 2px 4px rgba(0,0,0,.5)}
+.btn svg{width:14px; height:14px; stroke:currentColor; fill:none; stroke-width:1.6}
+.btn--primary{background:linear-gradient(180deg,#5a4420,#3d2c14); border-color:var(--brass-lo); color:var(--brass-hi)}
+.btn--primary:hover{border-color:var(--brass)}
+.btn--solid{
+  background:var(--gild); border-color:#6b4f16; color:#241a06;
+  text-shadow:0 1px 0 rgba(255,238,190,.5); box-shadow:inset 0 1px 0 rgba(255,245,210,.6), 0 2px 3px rgba(0,0,0,.55);
+}
+.btn--solid:hover{background:linear-gradient(180deg,#f2dc9a,#d4ae32 46%,#a8811c 54%,#e5c977)}
+.btn--arcane{background:linear-gradient(180deg,#3a2f5c,#271f3f); border-color:#5b4a94; color:var(--arcane-soft)}
+.btn--arcane:hover{border-color:var(--arcane); color:#d3c6ff}
+.btn--danger{background:linear-gradient(180deg,#4a1f1b,#331411); border-color:#7a2a24; color:var(--wax-hi)}
+.btn--danger:hover{border-color:var(--wax); color:#e69783}
+.btn--ghost{background:transparent; border-color:transparent; box-shadow:none; color:var(--text-dim); font-weight:400; font-family:var(--font-body); letter-spacing:.02em; font-size:14px}
+.btn--ghost:hover{background:rgba(201,162,39,.07); color:var(--text)}
+.btn--sm{padding:6px 10px; font-size:11.5px}
+.btn--wide{width:100%; justify-content:center}
+.btn[disabled],.btn.is-disabled{opacity:.4; cursor:not-allowed; pointer-events:none}
+
+.iconbtn{
+  width:31px; height:31px; display:inline-grid; place-items:center; cursor:pointer;
+  background:transparent; border:1px solid transparent; border-radius:var(--r-control); color:var(--text-dim);
+}
+.iconbtn:hover{background:rgba(201,162,39,.09); color:var(--brass-hi); border-color:var(--rule)}
+.iconbtn.on{background:var(--brass-wash); border-color:var(--brass-lo); color:var(--brass-hi)}
+.iconbtn svg{width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.6}
+
+/* ---------- segmented / toggle ---------- */
+.seg{display:inline-flex; background:#1b140b; border:1px solid var(--rule); border-radius:var(--r-control);
+  padding:2px; box-shadow:inset 0 2px 4px rgba(0,0,0,.5)}
+.seg button{
+  font:600 12px/1 var(--font-display); letter-spacing:.09em; color:var(--text-faint);
+  background:transparent; border:0; padding:8px 16px; cursor:pointer; border-radius:1px;
+  display:flex; align-items:center; gap:7px;
+}
+.seg button svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.6}
+.seg button:hover{color:var(--text-dim)}
+.seg button.on{background:var(--gild); color:#241a06; text-shadow:0 1px 0 rgba(255,238,190,.5)}
+.seg--arcane button.on{background:linear-gradient(180deg,#9c81e0,#6f57b4); color:#fff; text-shadow:none}
+
+.switch{display:flex; align-items:center; justify-content:space-between; gap:var(--s3); padding:7px 0; cursor:pointer}
+.switch span{font-size:14.5px; color:var(--text-dim)}
+.switch i{
+  width:36px; height:19px; background:#1b140b; border:1px solid var(--rule); border-radius:10px;
+  position:relative; flex:none; box-shadow:inset 0 2px 3px rgba(0,0,0,.55);
+}
+.switch i::after{
+  content:""; position:absolute; width:13px; height:13px; border-radius:50%;
+  background:var(--text-faint); top:2px; left:2px; transition:transform .15s, background .15s;
+}
+.switch.on i{border-color:var(--brass-lo)}
+.switch.on i::after{transform:translateX(17px); background:var(--gild); box-shadow:0 0 6px rgba(201,162,39,.5)}
+.switch.on span{color:var(--text)}
+
+/* ---------- inputs: ink wells ---------- */
+.input,.select,textarea.input{
+  width:100%; background:#160f08; color:var(--text); border:1px solid var(--rule);
+  border-radius:var(--r-control); padding:8px 11px; font:400 14.5px/1.4 var(--font-body);
+  box-shadow:inset 0 2px 4px rgba(0,0,0,.5);
+}
+.input:hover,.select:hover{border-color:var(--brass-lo)}
+.input:focus,.select:focus,textarea.input:focus{
+  outline:none; border-color:var(--brass); box-shadow:inset 0 2px 4px rgba(0,0,0,.5), 0 0 0 2px var(--brass-wash)}
+.input::placeholder{color:var(--text-faint); font-style:italic}
+.input--mono{font-family:var(--font-mono); font-size:13px}
+textarea.input{resize:vertical; min-height:66px}
+.select{appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--brass-lo) 50%),linear-gradient(135deg,var(--brass-lo) 50%,transparent 50%);
+  background-position:calc(100% - 16px) 52%, calc(100% - 11px) 52%;
+  background-size:5px 5px,5px 5px; background-repeat:no-repeat; padding-right:30px;
+  background-color:#160f08}
+.search{position:relative}
+.search svg{position:absolute; left:10px; top:50%; margin-top:-7px; width:14px; height:14px;
+  stroke:var(--brass-lo); fill:none; stroke-width:1.7}
+.search .input{padding-left:31px}
+.field{margin-bottom:var(--s3)}
+
+input[type=range]{-webkit-appearance:none; width:100%; height:20px; background:transparent; cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:4px; background:#160f08; border:1px solid var(--rule); border-radius:3px}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none; width:15px; height:15px; margin-top:-6px; border-radius:50%;
+  background:var(--gild); border:1px solid #6b4f16; box-shadow:0 1px 3px rgba(0,0,0,.6)}
+input[type=range]::-moz-range-track{height:4px; background:#160f08; border:1px solid var(--rule)}
+input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#c9a227;border:1px solid #6b4f16}
+
+/* ---------- chips, tags, pips ---------- */
+.chip{
+  display:inline-flex; align-items:center; gap:6px; padding:5px 12px; font-size:13.5px;
+  background:linear-gradient(180deg,#2e2314,#241b10); border:1px solid var(--rule);
+  border-radius:11px; color:var(--text-dim); cursor:pointer;
+}
+.chip:hover{border-color:var(--brass-lo); color:var(--text)}
+.chip.on{background:linear-gradient(180deg,#5a4420,#3d2c14); border-color:var(--brass); color:var(--brass-hi)}
+.chip--action{
+  border-style:solid; border-color:#5b4a94; color:var(--arcane-soft);
+  background:linear-gradient(180deg,#332a52,#241d3a); font-style:italic;
+}
+.chip--cond{border-radius:var(--r-control)}
+.chip--cond.on{background:linear-gradient(180deg,#4a1f1b,#331411); border-color:var(--wax); color:var(--wax-hi)}
+.tag{display:inline-flex; padding:2px 8px; font:600 10px/1.7 var(--font-display); letter-spacing:.1em; border-radius:1px}
+.tag--free{background:var(--verd-wash); color:var(--verd); border:1px solid rgba(95,156,114,.4)}
+.tag--local{background:var(--arcane-wash); color:var(--arcane-soft); border:1px solid #5b4a94}
+.tag--boss{background:var(--wax-wash); color:var(--wax-hi); border:1px solid #7a2a24}
+
+.pips{display:flex; gap:5px}
+.pips i{width:14px; height:14px; border:1px solid var(--brass-lo); border-radius:50%; cursor:pointer;
+  background:#160f08; box-shadow:inset 0 1px 2px rgba(0,0,0,.6)}
+.pips i.on{background:var(--gild); box-shadow:0 0 5px rgba(201,162,39,.45)}
+.pips--wax i{border-color:#7a2a24}
+.pips--wax i.on{background:linear-gradient(180deg,#c04a3e,#8c231d); box-shadow:0 0 5px rgba(158,47,40,.5)}
+.pips--verd i{border-color:#3f6b4c}
+.pips--verd i.on{background:linear-gradient(180deg,#79b88a,#4c7f5c); box-shadow:0 0 5px rgba(95,156,114,.45)}
+
+/* ---------- status ---------- */
+.dot{display:inline-flex; align-items:center; gap:7px; font-size:13.5px; color:var(--text-dim)}
+.dot::before{content:""; width:6px; height:6px; border-radius:50%; background:var(--text-faint)}
+.dot--live::before{background:var(--verd); box-shadow:0 0 8px var(--verd)}
+.dot--busy::before{background:var(--amber); box-shadow:0 0 8px var(--amber)}
+.dot--off::before{background:var(--text-faint)}
+.dot--err::before{background:var(--wax); box-shadow:0 0 8px var(--wax)}
+.dot--ai::before{background:var(--arcane); box-shadow:0 0 8px var(--arcane)}
+
+.kbd{
+  font:600 10.5px/1 var(--font-display); letter-spacing:.06em; color:var(--brass-hi);
+  background:linear-gradient(180deg,#3d2e1a,#2b2013); border:1px solid var(--rule);
+  border-bottom-width:2px; border-radius:2px; padding:5px 7px; display:inline-block;
+}
+
+/* ---------- bars ---------- */
+.meter{height:6px; background:#160f08; border:1px solid var(--rule); border-radius:3px; overflow:hidden;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.6)}
+.meter b{display:block; height:100%; background:linear-gradient(180deg,#79b88a,#4c7f5c)}
+.meter--hurt b{background:linear-gradient(180deg,#e0a340,#a86a1e)}
+.meter--crit b{background:linear-gradient(180deg,#c04a3e,#8c231d)}
+.progress{height:4px; background:#160f08; border:1px solid var(--rule); border-radius:2px; overflow:hidden}
+.progress b{display:block; height:100%; background:linear-gradient(180deg,#a48ce4,#6f57b4)}
+
+.spinner{width:15px;height:15px;border:2px solid #3d2e1a;border-top-color:var(--brass);
+  border-radius:50%; animation:spin .8s linear infinite; display:inline-block}
+.spinner--arcane{border-top-color:var(--arcane)}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---------- callouts & toasts ---------- */
+.callout{display:flex; gap:11px; padding:11px 13px; border-radius:var(--r-control);
+  border:1px solid var(--rule); background:linear-gradient(180deg,#2e2314,#241b10);
+  font-size:14px; color:var(--text-dim); align-items:flex-start; line-height:1.5}
+.callout svg{width:16px;height:16px;flex:none;margin-top:2px;stroke-width:1.6;fill:none;stroke:var(--text-faint)}
+.callout b{color:var(--text); font-weight:600; font-family:var(--font-display); font-size:13px;
+  letter-spacing:.05em; display:block; margin-bottom:3px}
+.callout--warn{background:linear-gradient(180deg,#3d2c12,#2a1e0c); border-color:#7a5518} .callout--warn svg{stroke:var(--amber)}
+.callout--err{background:linear-gradient(180deg,#3d1a16,#2a110e); border-color:#7a2a24} .callout--err svg{stroke:var(--wax-hi)}
+.callout--ok{background:linear-gradient(180deg,#1d3324,#132218); border-color:#3f6b4c} .callout--ok svg{stroke:var(--verd)}
+.callout--ai{background:linear-gradient(180deg,#2c2447,#1f1935); border-color:#5b4a94} .callout--ai svg{stroke:var(--arcane-soft)}
+
+.toast{
+  display:flex; gap:11px; align-items:flex-start; width:340px; padding:12px 13px;
+  background:linear-gradient(180deg,#2e2314,#211910); border:1px solid var(--rule);
+  border-left:3px solid var(--text-faint); border-radius:var(--r-control);
+  box-shadow:var(--shadow-pop); font-size:14px; color:var(--text-dim); line-height:1.45;
+}
+.toast b{display:block; color:var(--text); font-family:var(--font-display); font-size:13px;
+  letter-spacing:.05em; margin-bottom:3px}
+.toast svg{width:16px;height:16px;flex:none;margin-top:2px;fill:none;stroke-width:1.7}
+.toast--ok{border-left-color:var(--verd)} .toast--ok svg{stroke:var(--verd)}
+.toast--warn{border-left-color:var(--amber)} .toast--warn svg{stroke:var(--amber)}
+.toast--err{border-left-color:var(--wax)} .toast--err svg{stroke:var(--wax-hi)}
+.toast--info{border-left-color:var(--brass)} .toast--info svg{stroke:var(--brass)}
+.toast .iconbtn{margin-left:auto; width:23px; height:23px}
+
+.empty{text-align:center; padding:var(--s8) var(--s4); border:1px solid var(--rule); border-radius:var(--r-card);
+  background:rgba(0,0,0,.18)}
+.empty svg{width:28px; height:28px; stroke:var(--brass-lo); fill:none; stroke-width:1.2; margin:0 auto 11px}
+.empty h4{font-size:15px; margin-bottom:6px; color:var(--brass-hi)}
+.empty p{margin:0 0 var(--s3); font-size:14px; color:var(--text-faint); max-width:36ch; margin-inline:auto; font-style:italic}
+
+/* ---------- swatches ---------- */
+.sw{border:1px solid var(--rule); border-radius:var(--r-card); overflow:hidden; background:var(--leather-800)}
+.sw i{display:block; height:56px}
+.sw div{padding:9px 11px; font-size:13px; color:var(--text-faint)}
+.sw b{display:block; color:var(--brass-hi); font-family:var(--font-display); font-size:12px;
+  letter-spacing:.07em; margin-bottom:3px}
+
+/* ---------- app shell ---------- */
+.app{border:1px solid var(--rule); border-radius:var(--r-card); overflow:hidden;
+  box-shadow:var(--shadow-panel), inset 0 0 0 1px rgba(0,0,0,.6); background:var(--leather-900)}
+.appbar{
+  height:52px; display:flex; align-items:center; gap:var(--s3); padding:0 var(--s3);
+  background:linear-gradient(180deg,#2d2214,#1d1509);
+  border-bottom:1px solid var(--rule); box-shadow:inset 0 -1px 0 rgba(201,162,39,.14);
+}
+.crest{width:28px; height:28px; flex:none}
+.appbar__title{font-family:var(--font-display); font-size:15px; color:var(--brass-hi); letter-spacing:.06em}
+.appbar__title small{display:block; font-family:var(--font-body); font-size:12.5px; color:var(--text-faint);
+  letter-spacing:0; font-style:italic; margin-top:-1px}
+.appbar__spacer{flex:1}
+.avatar{width:29px; height:29px; border-radius:50%; border:1px solid var(--brass-lo);
+  background:linear-gradient(180deg,#3d2e1a,#241b10); display:grid; place-items:center;
+  font:600 11px/1 var(--font-display); color:var(--brass-hi); letter-spacing:.04em}
+.avatar--sm{width:24px;height:24px;font-size:9.5px}
+
+.appbody{display:grid; grid-template-columns:280px minmax(0,1fr) 310px; height:540px}
+.appcol{overflow:auto; background:var(--leather-800)}
+.appcol--l{border-right:1px solid var(--rule); box-shadow:inset -1px 0 0 rgba(201,162,39,.1)}
+.appcol--r{border-left:1px solid var(--rule); box-shadow:inset 1px 0 0 rgba(201,162,39,.1)}
+@media(max-width:1000px){.appbody{grid-template-columns:1fr; height:auto}
+  .appcol{max-height:340px} .appcol--l,.appcol--r{border:0; border-top:1px solid var(--rule)}}
+
+.viewport{
+  position:relative; overflow:hidden;
+  background:radial-gradient(115% 85% at 50% 5%, #241a0f 0%, #0d0906 72%);
+}
+.viewport::after{content:""; position:absolute; inset:0; pointer-events:none;
+  box-shadow:inset 0 0 120px rgba(0,0,0,.75)}
+.viewport__grid{position:absolute; inset:0; opacity:.55;
+  background-image:linear-gradient(rgba(201,162,39,.13) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(201,162,39,.13) 1px,transparent 1px);
+  background-size:34px 34px;
+  transform:perspective(560px) rotateX(56deg) scale(1.7); transform-origin:50% 40%}
+.vp-tl{position:absolute; top:13px; left:13px; display:flex; gap:7px}
+.vp-tr{position:absolute; top:13px; right:13px; display:flex; gap:7px}
+.vp-bl{position:absolute; bottom:13px; left:13px}
+.vp-br{position:absolute; bottom:13px; right:13px}
+.vp-bar{display:flex; align-items:center; gap:2px; padding:4px;
+  background:linear-gradient(180deg,rgba(45,34,20,.94),rgba(24,17,9,.94));
+  border:1px solid var(--rule); border-radius:var(--r-control); backdrop-filter:blur(6px);
+  box-shadow:0 4px 14px rgba(0,0,0,.5), inset 0 1px 0 rgba(201,162,39,.14)}
+.hints{display:flex; gap:var(--s4); padding:8px 13px; font-size:13px; color:var(--text-faint);
+  background:linear-gradient(180deg,rgba(45,34,20,.94),rgba(24,17,9,.94));
+  border:1px solid var(--rule); border-radius:var(--r-control); backdrop-filter:blur(6px)}
+.hints span{display:flex; align-items:center; gap:6px}
+
+.placing{
+  display:flex; align-items:center; gap:10px; padding:7px 9px 7px 13px;
+  background:linear-gradient(180deg,rgba(58,44,22,.95),rgba(31,23,11,.95));
+  border:1px solid var(--brass-lo); border-left:3px solid var(--brass);
+  border-radius:var(--r-control); font-size:14px; backdrop-filter:blur(6px)}
+.placing em{font-style:italic; color:var(--brass-hi)}
+
+.selmark{position:absolute; width:100px; height:100px}
+.selmark i{position:absolute; width:14px; height:14px; border:2px solid var(--brass);
+  filter:drop-shadow(0 0 4px rgba(201,162,39,.6))}
+.selmark i:nth-child(1){top:0;left:0;border-right:0;border-bottom:0}
+.selmark i:nth-child(2){top:0;right:0;border-left:0;border-bottom:0}
+.selmark i:nth-child(3){bottom:0;left:0;border-right:0;border-top:0}
+.selmark i:nth-child(4){bottom:0;right:0;border-left:0;border-top:0}
+.selmark b{position:absolute; left:50%; top:-24px; transform:translateX(-50%); white-space:nowrap;
+  font:600 11px/1 var(--font-display); letter-spacing:.06em; color:var(--brass-hi);
+  background:rgba(24,17,9,.94); border:1px solid var(--brass-lo); border-radius:1px; padding:5px 8px}
+
+/* ---------- asset library ---------- */
+.libbar{padding:var(--s3); position:sticky; top:0; background:var(--leather-800); z-index:2;
+  border-bottom:1px solid var(--rule)}
+.cats{display:flex; gap:4px; margin-top:10px; overflow:auto; padding-bottom:2px}
+.cats button{
+  font:600 11.5px/1 var(--font-display); letter-spacing:.08em; background:transparent;
+  border:1px solid transparent; color:var(--text-faint); padding:7px 10px;
+  border-radius:var(--r-control); cursor:pointer; white-space:nowrap}
+.cats button:hover{color:var(--text); background:rgba(201,162,39,.07)}
+.cats button.on{color:var(--brass-hi); background:var(--brass-wash); border-color:var(--brass-lo)}
+
+.assets{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:var(--s3)}
+.asset{
+  background:linear-gradient(180deg,#2e2314,#241b10); border:1px solid var(--rule);
+  border-radius:var(--r-card); padding:9px 5px 7px; text-align:center; cursor:pointer; position:relative;
+  box-shadow:inset 0 1px 0 rgba(201,162,39,.08)}
+.asset:hover{border-color:var(--brass-lo)}
+.asset.on{border-color:var(--brass); background:linear-gradient(180deg,#5a4420,#3a2a13);
+  box-shadow:0 0 0 1px rgba(201,162,39,.3), inset 0 1px 0 rgba(240,220,160,.2)}
+.asset figure{margin:0 auto 7px; width:36px; height:36px; display:grid; place-items:center;
+  background:#160f08; border:1px solid var(--rule-in); border-radius:2px}
+.asset figure svg{width:20px; height:20px; stroke:var(--text-dim); fill:none; stroke-width:1.4}
+.asset.on figure svg{stroke:var(--brass-hi)}
+.asset span{font-size:12.5px; color:var(--text-dim); line-height:1.25; display:block}
+.asset .tag{position:absolute; top:4px; right:4px; font-size:8.5px; padding:1px 4px}
+.libfoot{padding:11px var(--s3); border-top:1px solid var(--rule); font-size:12.5px;
+  color:var(--text-faint); font-style:italic}
+.libfoot a{color:var(--text-dim)}
+.aitools{padding:var(--s3); display:grid; gap:7px; border-bottom:1px solid var(--rule)}
+
+/* ---------- right rail tabs ---------- */
+.rtabs{display:flex; border-bottom:1px solid var(--rule); background:linear-gradient(180deg,#2a2013,#211910);
+  position:sticky; top:0; z-index:2}
+.rtabs button{
+  flex:1; background:transparent; border:0; border-bottom:2px solid transparent; color:var(--text-faint);
+  font:600 12px/1 var(--font-display); letter-spacing:.1em; padding:13px 0; cursor:pointer}
+.rtabs button:hover{color:var(--text-dim)}
+.rtabs button.on{color:var(--brass-hi); border-bottom-color:var(--brass);
+  background:linear-gradient(180deg,rgba(201,162,39,.11),transparent)}
+
+/* ---------- inspector ---------- */
+.insp-sec{padding:var(--s3) var(--s4); border-bottom:1px solid var(--rule-in)}
+.xyz{display:grid; grid-template-columns:repeat(3,1fr); gap:7px}
+.xyz .label{font-family:var(--font-mono); font-style:normal; margin-bottom:4px; font-size:11px}
+.xyz .input{padding:7px 8px; font-family:var(--font-mono); font-size:13px; text-align:center}
+.presets{display:grid; grid-template-columns:repeat(4,1fr); gap:5px}
+.presets button{font:600 11px/1 var(--font-display); letter-spacing:.06em; padding:8px 0;
+  background:linear-gradient(180deg,#2e2314,#241b10); border:1px solid var(--rule);
+  border-radius:var(--r-control); color:var(--text-dim); cursor:pointer}
+.presets button.on{background:linear-gradient(180deg,#5a4420,#3d2c14); border-color:var(--brass); color:var(--brass-hi)}
+.attrib{font-size:12.5px; color:var(--text-faint); line-height:1.55; font-style:italic}
+.attrib a{color:var(--text-dim)}
+
+/* ---------- CHARACTER SHEET ON PARCHMENT ---------- */
+#sheet .plate{
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.6' numOctaves='4'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23p)' opacity='.10'/%3E%3C/svg%3E"),
+    radial-gradient(120% 100% at 50% 0%, #ece2c8 0%, #dbcda8 55%, #cbb98e 100%);
+  border-color:#8a7449; box-shadow:inset 0 0 22px rgba(120,95,55,.35), var(--shadow-panel);
+  color:var(--vellum-ink);
+}
+#sheet .plate::before{opacity:.55; filter:brightness(.55)}
+#sheet .plate__head h4,#sheet .plate__head h3{color:#4a3618}
+#sheet .plate__head::after{background:linear-gradient(90deg,transparent,var(--vellum-line) 12%,var(--vellum-line) 88%,transparent)}
+#sheet .label{color:var(--vellum-dim)}
+#sheet .input,#sheet .select,#sheet textarea.input{
+  background:rgba(255,252,240,.5); color:var(--vellum-ink); border-color:var(--vellum-line);
+  box-shadow:inset 0 1px 2px rgba(120,95,55,.25)}
+#sheet .input::placeholder{color:#8d7a58}
+#sheet .listrow{border-bottom-color:rgba(139,116,73,.4); color:var(--vellum-ink)}
+#sheet .listrow .mono{color:#5c4a2e}
+#sheet .iconbtn{color:#7a6440}
+#sheet .iconbtn:hover{background:rgba(120,95,55,.14); color:#3b2a12; border-color:var(--vellum-line)}
+#sheet .btn{background:linear-gradient(180deg,#cdb98d,#b8a173); border-color:#8a7449; color:#33240f;
+  box-shadow:inset 0 1px 0 rgba(255,250,235,.5), 0 1px 2px rgba(90,70,40,.35); text-shadow:none}
+#sheet .btn:hover{background:linear-gradient(180deg,#dbc79b,#c3ac7d); color:#241a06}
+#sheet .btn--solid{background:var(--gild); border-color:#6b4f16}
+#sheet .btn--danger{background:linear-gradient(180deg,#b8695c,#96453a); border-color:#7a2a24; color:#fff2ee}
+#sheet .btn--primary{background:linear-gradient(180deg,#d9c187,#bfa25c); border-color:#8a6b28; color:#2e2007}
+#sheet .btn--ghost{background:transparent; border-color:transparent; color:#6b5a3f; box-shadow:none}
+#sheet .switch span{color:#5c4a2e}
+#sheet .switch i{background:rgba(120,95,55,.2); border-color:var(--vellum-line); box-shadow:inset 0 1px 2px rgba(90,70,40,.3)}
+#sheet .meter{background:rgba(120,95,55,.22); border-color:var(--vellum-line)}
+#sheet .pips i{background:rgba(255,252,240,.45); border-color:#8a7449}
+#sheet .chip{background:rgba(255,252,240,.4); border-color:var(--vellum-line); color:#5c4a2e}
+#sheet .chip.on{background:linear-gradient(180deg,#b8695c,#96453a); border-color:#7a2a24; color:#fff2ee}
+#sheet .tag--free{background:rgba(95,156,114,.22); color:#2f6340; border-color:#5f8c6c}
+#sheet .tag--local{background:rgba(139,111,208,.2); color:#4e3f86; border-color:#7d6bbd}
+#sheet .tag--boss{background:rgba(158,47,40,.2); color:#7d2620; border-color:#a3564c}
+#sheet .dispname{color:#3b2a12}
+#sheet .pcard{background:rgba(255,252,240,.4); border-color:var(--vellum-line)}
+#sheet .pcard.on{background:rgba(255,250,232,.72); border-left-color:#9a7519}
+#sheet .pcard b{color:#33240f}
+#sheet .pcard small,#sheet .pcard .mono{color:#6b5a3f}
+#sheet .avatar{background:rgba(255,252,240,.6); border-color:#8a7449; color:#4a3618}
+#sheet .party{gap:8px}
+
+.abilities{display:grid; grid-template-columns:repeat(6,1fr); gap:8px}
+.ability{
+  background:rgba(255,252,240,.45); border:1px solid var(--vellum-line); border-radius:var(--r-card);
+  padding:10px 4px 8px; text-align:center; box-shadow:inset 0 1px 0 rgba(255,255,245,.6)}
+.ability .label{margin:0 0 4px; font:600 10.5px/1 var(--font-display); letter-spacing:.12em;
+  color:#7a6440; font-style:normal}
+.ability b{font:500 23px/1 var(--font-mono); display:block; color:var(--vellum-ink)}
+.ability em{font:600 12px/1 var(--font-display); font-style:normal; color:#8a6414; display:block; margin-top:5px}
+.vitals{display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:8px}
+.vital{background:rgba(255,252,240,.45); border:1px solid var(--vellum-line); border-radius:var(--r-card); padding:10px 12px}
+.vital b{font:500 25px/1 var(--font-mono); color:var(--vellum-ink)}
+.vital small{font:400 13px/1 var(--font-mono); color:#7a6440}
+.portrait{width:64px; height:64px; border-radius:var(--r-card); border:1px solid #8a7449;
+  background:rgba(255,252,240,.5); display:grid; place-items:center; flex:none}
+.portrait svg{width:24px;height:24px;stroke:#8a7449;fill:none;stroke-width:1.3}
+.listrow{display:flex; align-items:center; gap:var(--s2); padding:9px 0;
+  border-bottom:1px solid var(--rule-in); font-size:14.5px}
+.listrow:last-child{border-bottom:0}
+.listrow b{font-weight:600}
+.listrow .mono{color:var(--text-dim); font-size:13px}
+.listrow .iconbtn{width:25px;height:25px}
+.push{margin-left:auto}
+
+/* ---------- party rail / HUD ---------- */
+.party{display:flex; gap:8px}
+.pcard{width:120px; padding:9px; background:linear-gradient(180deg,#2e2314,#211910);
+  border:1px solid var(--rule); border-radius:var(--r-card); border-left:3px solid transparent}
+.pcard.on{border-left-color:var(--brass); background:linear-gradient(180deg,#3d2e1a,#291f11)}
+.pcard header{display:flex; gap:8px; align-items:center; margin-bottom:8px}
+.pcard b{font:600 13px/1.2 var(--font-display); letter-spacing:.04em; display:block; color:var(--brass-hi)}
+.pcard small{font-size:12px; color:var(--text-faint); font-style:italic}
+.pcard .mono{font-size:11.5px; color:var(--text-dim); display:flex; justify-content:space-between; margin-top:6px}
+
+.hud{display:flex; align-items:center; gap:var(--s4); padding:10px 13px;
+  background:linear-gradient(180deg,rgba(45,34,20,.95),rgba(24,17,9,.95));
+  border:1px solid var(--rule); border-radius:var(--r-card); backdrop-filter:blur(6px);
+  box-shadow:0 6px 20px rgba(0,0,0,.55), inset 0 1px 0 rgba(201,162,39,.15)}
+.hud__stat{font:500 17px/1 var(--font-mono); color:var(--brass-hi)}
+.hud__stat span{font:400 11.5px/1 var(--font-body); font-style:italic; color:var(--text-faint);
+  display:block; margin-bottom:4px}
+
+/* ---------- DM panel: illuminated narration ---------- */
+.log{display:grid; gap:13px; padding:var(--s4)}
+.msg{font-size:14.5px; line-height:1.6}
+.msg__meta{display:flex; align-items:center; gap:8px; margin-bottom:5px; font-size:12px; color:var(--text-faint)}
+.msg__who{font:600 11.5px/1 var(--font-display); letter-spacing:.11em}
+.msg--dm .msg__who{color:var(--arcane-soft)}
+.msg--pc .msg__who{color:var(--brass)}
+.msg--sys .msg__who{color:var(--text-faint)}
+.msg--dm p{margin:0; color:var(--text); font-family:var(--font-body); font-size:16px; line-height:1.68}
+.msg--dm:first-of-type p::first-letter{
+  font-family:var(--font-display); font-size:44px; line-height:.86; float:left;
+  margin:4px 9px 0 0; color:var(--brass); text-shadow:0 1px 0 rgba(0,0,0,.6)}
+.msg--pc p{margin:0; color:var(--text-dim)}
+.msg--sys p{margin:0; color:var(--text-faint); font-size:13.5px; font-style:italic}
+
+.roll{display:flex; align-items:center; gap:12px; padding:10px 12px;
+  background:linear-gradient(180deg,#2e2314,#211910);
+  border:1px solid var(--rule); border-left:3px solid var(--brass); border-radius:var(--r-control)}
+.roll__die{font:500 24px/1 var(--font-mono); color:var(--brass-hi); min-width:34px; text-align:center;
+  text-shadow:0 0 12px rgba(201,162,39,.4)}
+.roll__d{font-size:13px; color:var(--text-dim)}
+.roll__d b{display:block; color:var(--text); font-family:var(--font-display); font-size:12.5px;
+  letter-spacing:.06em; font-weight:600; margin-bottom:2px}
+.roll__out{margin-left:auto; font:600 11px/1 var(--font-display); letter-spacing:.1em; padding:5px 9px; border-radius:1px}
+.roll--pass{border-left-color:var(--verd)}
+.roll--pass .roll__out{background:var(--verd-wash); color:var(--verd); border:1px solid rgba(95,156,114,.4)}
+.roll--fail{border-left-color:var(--wax)}
+.roll--fail .roll__out{background:var(--wax-wash); color:var(--wax-hi); border:1px solid #7a2a24}
+.roll--fail .roll__die{color:var(--wax-hi); text-shadow:0 0 12px rgba(158,47,40,.5)}
+
+.dice{display:grid; grid-template-columns:repeat(7,1fr); gap:5px}
+.dice button{font:500 12px/1 var(--font-mono); padding:9px 0;
+  background:linear-gradient(180deg,#2e2314,#241b10); border:1px solid var(--rule);
+  border-radius:var(--r-control); color:var(--text-dim); cursor:pointer}
+.dice button:hover{border-color:var(--brass); color:var(--brass-hi);
+  background:linear-gradient(180deg,#4b3821,#31240f)}
+
+.composer{padding:var(--s4); border-top:1px solid var(--rule); background:linear-gradient(180deg,#241b10,#1d1509)}
+.composer__box{display:flex; gap:8px; align-items:flex-end}
+.composer textarea{min-height:40px}
+.transcript{font-size:13.5px; color:var(--text-faint); font-style:italic; padding:7px 0 0; margin:0}
+.transcript b{color:var(--arcane-soft); font-style:normal; font-weight:600}
+.mic{position:relative}
+.mic.on{color:var(--wax-hi)}
+.mic.on::after{content:""; position:absolute; inset:-3px; border:1px solid var(--wax);
+  border-radius:var(--r-control); animation:pulse 1.5s ease-out infinite}
+@keyframes pulse{0%{opacity:.9; transform:scale(.94)}100%{opacity:0; transform:scale(1.18)}}
+
+/* ---------- scenery studio ---------- */
+.insp-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px}
+.inspo{border:1px solid var(--rule); border-radius:var(--r-card); overflow:hidden; cursor:pointer;
+  background:var(--leather-700)}
+.inspo:hover{border-color:var(--arcane)}
+.inspo i{display:block; height:54px}
+.inspo span{display:block; padding:7px 8px; font-size:12.5px; color:var(--text-dim); line-height:1.3}
+.drop{border:1px dashed var(--rule); border-radius:var(--r-card); padding:var(--s5) var(--s3);
+  text-align:center; cursor:pointer; background:rgba(0,0,0,.22)}
+.drop:hover{border-color:var(--arcane); background:rgba(139,111,208,.09)}
+.drop svg{width:22px;height:22px;stroke:var(--brass-lo);fill:none;stroke-width:1.4;margin:0 auto 8px}
+.drop b{display:block; font-family:var(--font-display); font-size:13px; letter-spacing:.05em;
+  font-weight:600; margin-bottom:4px; color:var(--text)}
+.drop small{font-size:12.5px; color:var(--text-faint); font-style:italic}
+.filerow{display:flex; align-items:center; gap:9px; padding:8px 10px;
+  background:linear-gradient(180deg,#2e2314,#241b10); border:1px solid var(--rule);
+  border-radius:var(--r-control); font-size:13.5px}
+.filerow svg{width:14px;height:14px;stroke:var(--brass-lo);fill:none;stroke-width:1.5;flex:none}
+.filerow small{color:var(--text-faint); font-family:var(--font-mono); font-size:11px}
+
+/* ---------- import review ---------- */
+.conf{display:flex; align-items:center; gap:8px; min-width:82px}
+.conf .meter{width:40px; flex:none}
+.conf span{font:500 12px/1 var(--font-mono)}
+.conf--hi span{color:var(--verd)} .conf--hi b{background:linear-gradient(180deg,#79b88a,#4c7f5c)}
+.conf--mid span{color:var(--amber)} .conf--mid b{background:linear-gradient(180deg,#e0a340,#a86a1e)}
+.conf--lo span{color:var(--wax-hi)} .conf--lo b{background:linear-gradient(180deg,#c04a3e,#8c231d)}
+
+/* ---------- modal & splash ---------- */
+.stage{position:relative; height:310px; border:1px solid var(--rule); border-radius:var(--r-card);
+  overflow:hidden; display:grid; place-items:center;
+  background:radial-gradient(110% 90% at 50% 0%, #241a10, #0d0906)}
+.stage__back{position:absolute; inset:0; background:rgba(8,5,3,.76); backdrop-filter:blur(2px)}
+.modal{position:relative; width:min(420px,90%);
+  background:linear-gradient(180deg,#2a2013,#1d1509);
+  border:1px solid var(--brass-lo); box-shadow:var(--shadow-pop), inset 0 0 0 1px rgba(0,0,0,.55)}
+.modal::before{content:""; position:absolute; inset:4px; pointer-events:none;
+  border:1px solid rgba(201,162,39,.22)}
+.modal__head{display:flex; align-items:center; justify-content:space-between; padding:14px var(--s5);
+  border-bottom:1px solid var(--rule)}
+.modal__head h3{font-size:16px; color:var(--brass-hi)}
+.modal__body{padding:var(--s5); font-size:15px; color:var(--text-dim); line-height:1.6}
+.modal__foot{display:flex; justify-content:flex-end; gap:9px; padding:13px var(--s5); border-top:1px solid var(--rule)}
+
+.splash{text-align:center; position:relative}
+.splash h2{font-size:38px; letter-spacing:.22em; color:var(--brass-hi); margin-bottom:8px;
+  text-shadow:0 2px 18px rgba(201,162,39,.35)}
+.splash p{margin:0 0 var(--s5); font-size:14px; color:var(--text-faint); font-style:italic}
+.splash .crest{width:52px; height:52px; margin:0 auto var(--s4)}
+.loadbar{width:230px; margin:0 auto}
+
+:where(button,a,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--brass); outline-offset:2px}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+
+</style>
+</head>
+<body>
+
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></symbol>
+<symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.6 14 5v6l-6 3.4L2 11V5z"/><path d="M2 5l6 3.4L14 5M8 8.4V14.4"/></symbol>
+<symbol id="i-tree" viewBox="0 0 16 16"><path d="M8 1.5 4 7h2.2L3.5 11h9L9.8 7H12z"/><path d="M8 11v3.5"/></symbol>
+<symbol id="i-chair" viewBox="0 0 16 16"><path d="M4 2v6h8V2M3 8h10M4.5 8v6M11.5 8v6"/></symbol>
+<symbol id="i-flame" viewBox="0 0 16 16"><path d="M8 1.5c3 3 4.5 5 4.5 7.5a4.5 4.5 0 0 1-9 0C3.5 6.5 5 4.5 8 1.5z"/><path d="M8 14a2 2 0 0 1-2-2c0-1 1-2 2-3.5C9 10 10 11 10 12a2 2 0 0 1-2 2z"/></symbol>
+<symbol id="i-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="3"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5S13 11 13.5 14"/></symbol>
+<symbol id="i-sword" viewBox="0 0 16 16"><path d="M14 2 7 9M9.5 2.5 14 2l-.5 4.5M3 13l2-2M2 11l3 3M6.5 9.5 4 12"/></symbol>
+<symbol id="i-sparkle" viewBox="0 0 16 16"><path d="M8 1.5 9.4 6l4.6 1.4L9.4 8.8 8 13.4 6.6 8.8 2 7.4 6.6 6z"/><path d="M13 11.5v2.6M11.7 12.8h2.6"/></symbol>
+<symbol id="i-grid" viewBox="0 0 16 16"><path d="M2 2h12v12H2zM2 6h12M2 10h12M6 2v12M10 2v12"/></symbol>
+<symbol id="i-rotate" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13.8 1.5V4h-2.5"/></symbol>
+<symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.8 4h10.4M6 4V2.4h4V4M4 4l.7 9.6h6.6L12 4M6.6 6.6v4.6M9.4 6.6v4.6"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><path d="M5.5 5.5h8v8h-8zM10.5 5.5v-3h-8v8h3"/></symbol>
+<symbol id="i-eye" viewBox="0 0 16 16"><path d="M1 8s2.6-4.5 7-4.5S15 8 15 8s-2.6 4.5-7 4.5S1 8 1 8z"/><circle cx="8" cy="8" r="2"/></symbol>
+<symbol id="i-eyeoff" viewBox="0 0 16 16"><path d="M6.3 3.7A7.6 7.6 0 0 1 8 3.5c4.4 0 7 4.5 7 4.5a13 13 0 0 1-2.4 3M4 4.6A12.7 12.7 0 0 0 1 8s2.6 4.5 7 4.5a7.6 7.6 0 0 0 2.4-.4M2 2l12 12"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3.2" y="7" width="9.6" height="7" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></symbol>
+<symbol id="i-unlock" viewBox="0 0 16 16"><rect x="3.2" y="7" width="9.6" height="7" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 4.8-1"/></symbol>
+<symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="1.5" width="4" height="8" rx="2"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.5"/></symbol>
+<symbol id="i-send" viewBox="0 0 16 16"><path d="M14.5 1.5 7 9M14.5 1.5 10 14.5 7 9 1.5 6z"/></symbol>
+<symbol id="i-save" viewBox="0 0 16 16"><path d="M2.5 2.5h9L13.5 5v8.5h-11zM5 2.5v4h5v-4M5 13.5V9.5h6"/></symbol>
+<symbol id="i-upload" viewBox="0 0 16 16"><path d="M8 11V2.5M4.8 5.7 8 2.5l3.2 3.2M2.5 11v2.5h11V11"/></symbol>
+<symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.5V11M4.8 7.8 8 11l3.2-3.2M2.5 11v2.5h11V11"/></symbol>
+<symbol id="i-play" viewBox="0 0 16 16"><path d="M4 2.5 13 8l-9 5.5z"/></symbol>
+<symbol id="i-hammer" viewBox="0 0 16 16"><path d="M9.5 2 14 6.5l-2 2L7.5 4z"/><path d="M8.5 5 2.5 11v2.5H5l6-6"/></symbol>
+<symbol id="i-x" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></symbol>
+<symbol id="i-check" viewBox="0 0 16 16"><path d="M2.5 8.5 6 12l7.5-8"/></symbol>
+<symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 1.8 15 14H1zM8 6.2v3.4M8 11.6v.1"/></symbol>
+<symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.2v4M8 4.8v.1"/></symbol>
+<symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+<symbol id="i-minus" viewBox="0 0 16 16"><path d="M3 8h10"/></symbol>
+<symbol id="i-d20" viewBox="0 0 16 16"><path d="M8 1.3 14.2 5v6L8 14.7 1.8 11V5z"/><path d="m8 1.3 3 5.2H5zM5 6.5 1.8 5M11 6.5 14.2 5M5 6.5l3 8.2 3-8.2zM5 6.5h6"/></symbol>
+<symbol id="i-wifi" viewBox="0 0 16 16"><path d="M1.8 5.8a9 9 0 0 1 12.4 0M4.3 8.5a5.5 5.5 0 0 1 7.4 0M6.6 11.2a2.2 2.2 0 0 1 2.8 0M8 13.6v.1"/></symbol>
+<symbol id="i-panel-l" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6.5 3v10"/></symbol>
+<symbol id="i-panel-r" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M9.5 3v10"/></symbol>
+<symbol id="i-image" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="5.8" cy="6.4" r="1.1"/><path d="m2.4 11.6 3.4-3 3 2.4 2-1.8 2.8 2.4"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.6 7a5.7 5.7 0 1 0-.6 4"/><path d="M13.9 2.6V7h-4.4"/></symbol>
+<symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.8 12.8V3.2h4.4l1.4 1.8h6.6v7.8z"/></symbol>
+<symbol id="i-stop" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1"/></symbol>
+<symbol id="i-heart" viewBox="0 0 16 16"><path d="M8 13.6S1.8 10 1.8 5.8A3.3 3.3 0 0 1 8 4.3a3.3 3.3 0 0 1 6.2 1.5c0 4.2-6.2 7.8-6.2 7.8z"/></symbol>
+<symbol id="i-shield" viewBox="0 0 16 16"><path d="M8 1.6 13.4 4v4.4c0 3-2.4 4.8-5.4 6-3-1.2-5.4-3-5.4-6V4z"/></symbol>
+<symbol id="i-map" viewBox="0 0 16 16"><path d="M1.8 3.8 6 2.2v10L1.8 13.8zM6 2.2l4 1.6v10L6 12.2M10 3.8l4.2-1.6v10L10 13.8"/></symbol>
+<symbol id="i-crown" viewBox="0 0 16 16"><path d="M2 12.5h12M2.5 4.5 5 8l3-4.5L11 8l2.5-3.5v7h-11z"/></symbol>
+<symbol id="i-door" viewBox="0 0 16 16"><path d="M4 2h8v12H4zM9.6 8.2v.1"/></symbol>
+<symbol id="i-rock" viewBox="0 0 16 16"><path d="M1.8 11.5 5 5.5l3.5-2 4 3.2 1.7 4.8z"/><path d="M5 5.5 8.5 9l4-2.3M8.5 9v2.5"/></symbol>
+<symbol id="i-barrel" viewBox="0 0 16 16"><path d="M4 2.5h8c-.7 3.6-.7 7.4 0 11H4c.7-3.6.7-7.4 0-11z"/><path d="M3.4 5.5h9.2M3.4 10.5h9.2"/></symbol>
+</defs></svg>
+
+<div class="kit">
+<nav class="kit__nav">
+  <div class="kit__brand">
+    <svg class="crest" viewBox="0 0 32 32" fill="none">
+      <path d="M16 2.5 28 8v11c0 6-5.4 9.6-12 11.5C9.4 28.6 4 25 4 19V8z" stroke="#7d5f21" stroke-width="1.2"/>
+      <path d="M16 6 24.5 10v8.2c0 4.2-3.8 6.8-8.5 8.2-4.7-1.4-8.5-4-8.5-8.2V10z" fill="#c9a227" fill-opacity=".1" stroke="#c9a227" stroke-width="1.1"/>
+      <path d="M16 11.5 18 16l4.5 1.5L18 19l-2 4.5-2-4.5-4.5-1.5L14 16z" fill="#c9a227"/>
+    </svg>
+    <div><h1>DnDRom</h1><p>Interface kit</p></div>
+  </div>
+  <div class="kit__navgroup">Overview</div>
+  <a href="#shell" class="on">App shell</a>
+  <a href="#found">Foundations</a>
+  <a href="#controls">Controls</a>
+  <div class="kit__navgroup">Build</div>
+  <a href="#library">Asset library</a>
+  <a href="#map">Map &amp; viewport</a>
+  <a href="#inspector">Object inspector</a>
+  <a href="#scenery">Scenery Studio</a>
+  <div class="kit__navgroup">Characters</div>
+  <a href="#sheet">Character sheet</a>
+  <a href="#import">Import review</a>
+  <a href="#forge">Character Forge</a>
+  <div class="kit__navgroup">Play</div>
+  <a href="#playmode">Party &amp; HUD</a>
+  <a href="#dm">Dungeon Master</a>
+  <a href="#session">Session</a>
+  <div class="kit__navgroup">System</div>
+  <a href="#states">States &amp; feedback</a>
+</nav>
+
+<main class="kit__main">
+
+<!-- ============ APP SHELL ============ -->
+<section class="sec" id="shell">
+  <div class="sec__head">
+    <h2>App shell</h2>
+    <p>Header, asset library, viewport, and right rail in build mode.</p>
+  </div>
+
+  <div class="app">
+    <header class="appbar">
+      <button class="iconbtn on" title="Hide library"><svg><use href="#i-panel-l"/></svg></button>
+      <svg class="crest" viewBox="0 0 32 32" fill="none">
+        <path d="M16 2.5 28 8v11c0 6-5.4 9.6-12 11.5C9.4 28.6 4 25 4 19V8z" stroke="#7d5f21" stroke-width="1.2"/>
+        <path d="M16 11.5 18 16l4.5 1.5L18 19l-2 4.5-2-4.5-4.5-1.5L14 16z" fill="#c9a227"/>
+      </svg>
+      <div class="appbar__title">The Vale of Ash<small>Emberfall Crossing · 40 × 40</small></div>
+      <div class="seg" style="margin-left:14px">
+        <button class="on"><svg><use href="#i-hammer"/></svg>Build</button>
+        <button><svg><use href="#i-play"/></svg>Play</button>
+      </div>
+      <div class="appbar__spacer"></div>
+      <span class="dot dot--live">Runs on this machine</span>
+      <span class="dot dot--off" style="margin-left:6px">Saved 12:04</span>
+      <div class="avatar" title="Casey — DM" style="margin-left:6px">CS</div>
+      <button class="iconbtn on" title="Hide right panel"><svg><use href="#i-panel-r"/></svg></button>
+    </header>
+
+    <div class="appbody">
+      <!-- left: library -->
+      <div class="appcol appcol--l">
+        <div class="libbar">
+          <div class="search">
+            <svg><use href="#i-search"/></svg>
+            <input class="input" placeholder="Search 43 assets">
+          </div>
+          <div class="cats">
+            <button class="on">All</button><button>Build</button><button>Props</button>
+            <button>Nature</button><button>Minis</button><button>Effects</button>
+          </div>
+        </div>
+        <div class="aitools">
+          <button class="btn btn--arcane btn--sm btn--wide"><svg><use href="#i-sparkle"/></svg>Generate campaign</button>
+          <div class="row" style="gap:6px; margin:0">
+            <button class="btn btn--sm" style="flex:1"><svg><use href="#i-image"/></svg>Scenery</button>
+            <button class="btn btn--sm" style="flex:1"><svg><use href="#i-user"/></svg>Forge</button>
+          </div>
+        </div>
+        <div class="assets">
+          <div class="asset"><figure><svg><use href="#i-grid"/></svg></figure><span>Stone floor</span></div>
+          <div class="asset on"><figure><svg><use href="#i-cube"/></svg></figure><span>Stone wall</span></div>
+          <div class="asset"><figure><svg><use href="#i-door"/></svg></figure><span>Wooden door</span></div>
+          <div class="asset"><figure><svg><use href="#i-tree"/></svg></figure><span>Pine tree</span></div>
+          <div class="asset"><figure><svg><use href="#i-rock"/></svg></figure><span>Rock</span></div>
+          <div class="asset"><figure><svg><use href="#i-barrel"/></svg></figure><span>Barrel</span></div>
+          <div class="asset"><figure><svg><use href="#i-flame"/></svg></figure><span>Torch</span></div>
+          <div class="asset"><figure><svg><use href="#i-chair"/></svg></figure><span>Chair</span></div>
+          <div class="asset"><figure><svg><use href="#i-sword"/></svg></figure><span>Hero</span></div>
+        </div>
+        <div class="libfoot">43 assets · 13 from <a href="#library">Kenney (CC0)</a>, free to ship and modify.</div>
+      </div>
+
+      <!-- centre: viewport -->
+      <div class="viewport">
+        <div class="viewport__grid"></div>
+        <div class="selmark" style="left:38%; top:34%">
+          <b>Stone wall · locked</b><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="vp-tl">
+          <div class="vp-bar">
+            <button class="iconbtn on" title="Grid (G)"><svg><use href="#i-grid"/></svg></button>
+            <button class="iconbtn" title="Rotate (R)"><svg><use href="#i-rotate"/></svg></button>
+            <button class="iconbtn" title="Duplicate"><svg><use href="#i-copy"/></svg></button>
+            <button class="iconbtn" title="Delete"><svg><use href="#i-trash"/></svg></button>
+          </div>
+        </div>
+        <div class="vp-tr">
+          <div class="placing">
+            Placing <em>Stone wall</em>
+            <button class="btn btn--ghost btn--sm">Cancel</button>
+          </div>
+        </div>
+        <div class="vp-bl">
+          <div class="hints">
+            <span><span class="kbd">G</span> Grid</span>
+            <span><span class="kbd">R</span> Rotate</span>
+            <span><span class="kbd">Del</span> Remove</span>
+            <span><span class="kbd">Esc</span> Cancel</span>
+          </div>
+        </div>
+        <div class="vp-br">
+          <div class="vp-bar"><span class="dot dot--busy" style="padding:0 8px">Drag to orbit · scroll to zoom</span></div>
+        </div>
+      </div>
+
+      <!-- right: rail -->
+      <div class="appcol appcol--r">
+        <div class="rtabs">
+          <button>DM</button><button class="on">Object</button><button>Party</button><button>Session</button>
+        </div>
+        <div class="insp-sec">
+          <div class="row" style="margin:0; justify-content:space-between">
+            <b class="dispname">Stone wall</b>
+            <span class="tag tag--free">CC0</span>
+          </div>
+        </div>
+        <div class="insp-sec">
+          <span class="label">Position</span>
+          <div class="xyz">
+            <label><span class="label">x</span><input class="input" value="12.0"></label>
+            <label><span class="label">y</span><input class="input" value="0.0"></label>
+            <label><span class="label">z</span><input class="input" value="-4.5"></label>
+          </div>
+        </div>
+        <div class="insp-sec">
+          <div class="row" style="justify-content:space-between; margin-bottom:8px">
+            <span class="label" style="margin:0">Rotation</span>
+            <button class="btn btn--ghost btn--sm">Reset</button>
+          </div>
+          <div class="xyz">
+            <label><span class="label">x</span><input class="input" value="0"></label>
+            <label><span class="label">y</span><input class="input" value="90"></label>
+            <label><span class="label">z</span><input class="input" value="0"></label>
+          </div>
+        </div>
+        <div class="insp-sec">
+          <span class="label">Notes for you only</span>
+          <textarea class="input" placeholder="Players never see this.">Cracked — Perception DC 13 reveals the passage behind.</textarea>
+        </div>
+        <div class="insp-sec">
+          <div class="switch on"><span>Visible to players</span><i></i></div>
+          <div class="switch on"><span>Locked in place</span><i></i></div>
+        </div>
+        <div class="insp-sec" style="display:flex; gap:7px; border:0">
+          <button class="btn btn--sm" style="flex:1"><svg><use href="#i-copy"/></svg>Duplicate</button>
+          <button class="btn btn--danger btn--sm" style="flex:1"><svg><use href="#i-trash"/></svg>Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOUNDATIONS ============ -->
+<section class="sec" id="found">
+  <div class="sec__head">
+    <h2>Foundations</h2>
+    <p>Lamplight on tooled leather and brass. Colour still carries meaning: violet means a model is running on your machine.</p>
+  </div>
+
+  <h3 style="font-size:14px; margin-bottom:10px">Surfaces</h3>
+  <div class="grid g4" style="margin-bottom:var(--s6)">
+    <div class="sw"><i style="background:#100c08"></i><div><b>Pitch</b>#100c08 — the dark beyond the lamplight</div></div>
+    <div class="sw"><i style="background:#20180e"></i><div><b>Tooled leather</b>#20180e — panel face</div></div>
+    <div class="sw"><i style="background:#2a2013"></i><div><b>Worn leather</b>#2a2013 — rows and controls</div></div>
+    <div class="sw"><i style="background:#513c22"></i><div><b>Stitching</b>#513c22 — every hairline</div></div>
+    <div class="sw"><i style="background:linear-gradient(180deg,#ece2c8,#cbb98e)"></i><div><b>Vellum</b>#e5d9bb — anything you write on</div></div>
+    <div class="sw"><i style="background:#2a1f12"></i><div><b>Iron gall ink</b>#2a1f12 — text on vellum</div></div>
+    <div class="sw"><i style="background:#efe3c6"></i><div><b>Candlelight</b>#efe3c6 — text on leather</div></div>
+    <div class="sw"><i style="background:#7d6b4f"></i><div><b>Ash</b>#7d6b4f — quiet text</div></div>
+  </div>
+
+  <h3 style="font-size:14px; margin-bottom:10px">Meaning</h3>
+  <div class="grid g4" style="margin-bottom:var(--s6)">
+    <div class="sw"><i style="background:linear-gradient(180deg,#e8ce7a,#c9a227 46%,#9a7519 54%,#d9bb63)"></i><div><b>Struck brass</b>Selection, focus, and the one primary action in any view.</div></div>
+    <div class="sw"><i style="background:#5f9c72"></i><div><b>Verdigris</b>Saved, connected, healthy, a passed check.</div></div>
+    <div class="sw"><i style="background:#c8862a"></i><div><b>Tallow</b>Unsaved work, low confidence, wounded.</div></div>
+    <div class="sw"><i style="background:#9e2f28"></i><div><b>Sealing wax</b>Damage, deletion, failure, a broken connection.</div></div>
+    <div class="sw"><i style="background:#8b6fd0"></i><div><b>Arcane</b>Local AI only: generation, forging, the DM's voice.</div></div>
+    <div class="sw"><i style="background:linear-gradient(90deg,#c9a227,#513c22)"></i><div><b>Brass rail</b>The 3px mark on the active tab, tool, or character.</div></div>
+  </div>
+
+  <h3 style="font-size:14px; margin-bottom:10px">Type</h3>
+  <div class="grid g2">
+    <div class="plate"><div class="plate__body">
+      <p class="label">Cinzel — names, titles, struck-brass labels</p>
+      <p style="font-family:var(--font-display); font-size:27px; letter-spacing:.06em; color:var(--brass-hi); margin:0 0 8px">Thalia Ravenmark</p>
+      <p style="font-family:var(--font-body); font-size:16px; line-height:1.7; color:var(--text-dim); margin:0">
+        The lantern gutters as you reach the crossing. Something below the bridge shifts its weight, and the boards answer.</p>
+    </div></div>
+    <div class="plate"><div class="plate__body">
+      <p class="label">EB Garamond — body text, controls, everything you read</p>
+      <p style="margin:0 0 12px">Rotate selected object · Add to miniature library · Test local model</p>
+      <p class="label">IBM Plex Mono — anything you compare down a column</p>
+      <p class="mono" style="margin:0; font-size:15px">12.0 · −4.5 · 90°  ·  HP 34/41  ·  AC 17  ·  d20 18</p>
+    </div></div>
+  </div>
+
+  <h3 style="font-size:14px; margin:var(--s6) 0 10px">Plate</h3>
+  <p class="note">Every panel is a leather plate with four engraved brass corners. Radius stays near zero — this world does not have rounded rectangles in it. Anything you would write on becomes vellum instead, which is why the character sheet is the only pale surface in the app.</p>
+  <div class="grid g3">
+    <div class="plate"><div class="plate__head"><h4>Leather plate</h4><button class="iconbtn"><svg><use href="#i-x"/></svg></button></div>
+      <div class="plate__body" style="color:var(--text-dim); font-size:12px">Engraved corners, a diamond before the title, a hairline that fades at both ends.</div></div>
+    <div class="plate plate--raised"><div class="plate__head"><h4>Raised plate</h4></div>
+      <div class="plate__body" style="color:var(--text-dim); font-size:12px">Lighter leather, for anything floating over the table.</div></div>
+    <div class="plate" style="border-color:var(--brass-deep)"><div class="plate__head"><h4>Selected plate</h4></div>
+      <div class="plate__body" style="color:var(--text-dim); font-size:12px">A brass edge and nothing else. Selection never floods a surface.</div></div>
+  </div>
+</section>
+
+<!-- ============ CONTROLS ============ -->
+<section class="sec" id="controls">
+  <div class="sec__head">
+    <h2>Controls</h2>
+    <p>One primary action per view. Everything else is quiet.</p>
+  </div>
+
+  <div class="grid g2">
+    <div class="plate"><div class="plate__head"><h4>Buttons</h4></div><div class="plate__body">
+      <div class="row">
+        <button class="btn btn--solid"><svg><use href="#i-save"/></svg>Save campaign</button>
+        <button class="btn btn--primary"><svg><use href="#i-plus"/></svg>New character</button>
+        <button class="btn">Import</button>
+        <button class="btn btn--ghost">Cancel</button>
+      </div>
+      <div class="row">
+        <button class="btn btn--arcane"><svg><use href="#i-sparkle"/></svg>Generate scenery</button>
+        <button class="btn btn--danger"><svg><use href="#i-trash"/></svg>Reset campaign</button>
+      </div>
+      <div class="row" style="margin:0">
+        <button class="btn btn--sm">Small</button>
+        <button class="btn btn--sm is-busy"><span class="spinner"></span>Saving</button>
+        <button class="btn" disabled>Needs a model</button>
+      </div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Icon buttons and tools</h4></div><div class="plate__body">
+      <div class="row">
+        <button class="iconbtn on"><svg><use href="#i-grid"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-rotate"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-copy"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-eye"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-eyeoff"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-lock"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-unlock"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-trash"/></svg></button>
+      </div>
+      <p class="label">Mode switches</p>
+      <div class="row">
+        <div class="seg"><button class="on"><svg><use href="#i-hammer"/></svg>Build</button><button><svg><use href="#i-play"/></svg>Play</button></div>
+        <div class="seg"><button class="on">Peer to peer</button><button>Relay</button></div>
+      </div>
+      <p class="label">Keys</p>
+      <div class="row" style="margin:0">
+        <span class="kbd">G</span><span class="kbd">R</span><span class="kbd">Del</span><span class="kbd">Esc</span><span class="kbd">Ctrl S</span>
+      </div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Fields</h4></div><div class="plate__body">
+      <div class="field"><span class="label">Map name</span><input class="input" value="Emberfall Crossing"></div>
+      <div class="field"><span class="label">Search</span>
+        <div class="search"><svg><use href="#i-search"/></svg><input class="input" placeholder="Search 43 assets"></div>
+      </div>
+      <div class="field"><span class="label">Theme</span>
+        <select class="select"><option>Dungeon</option><option selected>Tavern</option><option>Forest</option><option>Ruins</option><option>Cavern</option></select>
+      </div>
+      <div class="field"><span class="label">Local model</span>
+        <input class="input input--mono" value="llama3.1:8b-instruct-q5_K_M"></div>
+      <div class="field" style="margin:0"><span class="label">Mesh detail — 12,000 triangles</span><input type="range" value="42"></div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Selection and state</h4></div><div class="plate__body">
+      <p class="label">Filters</p>
+      <div class="row"><span class="chip on">All</span><span class="chip">Build</span><span class="chip">Props</span><span class="chip">Nature</span><span class="chip">Minis</span></div>
+      <p class="label">Suggested actions</p>
+      <div class="row"><span class="chip chip--action">Search the body</span><span class="chip chip--action">Listen at the door</span></div>
+      <p class="label">Resources</p>
+      <div class="row"><div class="pips"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></div>
+        <span class="mono" style="font-size:12px; color:var(--text-dim)">3 / 5 spell slots</span></div>
+      <p class="label">Status</p>
+      <div class="row" style="margin:0; gap:var(--s4)">
+        <span class="dot dot--live">Connected</span><span class="dot dot--busy">Thinking</span>
+        <span class="dot dot--err">Disconnected</span><span class="dot dot--ai">Model loaded</span>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ LIBRARY ============ -->
+<section class="sec" id="library">
+  <div class="sec__head">
+    <h2>Asset library</h2>
+    <p>Three columns. Thumbnails sit in inset wells so they read as objects on a shelf.</p>
+  </div>
+  <div class="grid g3" style="align-items:start">
+    <div class="plate" style="grid-column:span 1">
+      <div class="libbar" style="background:transparent">
+        <div class="search"><svg><use href="#i-search"/></svg><input class="input" placeholder="Search 43 assets"></div>
+        <div class="cats"><button class="on">All</button><button>Build</button><button>Props</button><button>Nature</button><button>Minis</button><button>Effects</button></div>
+      </div>
+      <div class="assets">
+        <div class="asset"><figure><svg><use href="#i-grid"/></svg></figure><span>Stone floor</span></div>
+        <div class="asset"><figure><svg><use href="#i-grid"/></svg></figure><span>Wood floor</span></div>
+        <div class="asset on"><figure><svg><use href="#i-cube"/></svg></figure><span>Stone wall</span></div>
+        <div class="asset"><figure><svg><use href="#i-cube"/></svg></figure><span>Timber wall</span></div>
+        <div class="asset"><figure><svg><use href="#i-door"/></svg></figure><span>Wooden door</span></div>
+        <div class="asset"><figure><svg><use href="#i-cube"/></svg></figure><span>Stone pillar</span></div>
+        <div class="asset"><figure><svg><use href="#i-tree"/></svg></figure><span>Pine tree</span></div>
+        <div class="asset"><figure><svg><use href="#i-barrel"/></svg></figure><span>Barrel</span></div>
+        <div class="asset"><figure><svg><use href="#i-flame"/></svg></figure><span>Campfire</span></div>
+      </div>
+      <div class="libfoot">43 assets · 13 from Kenney (CC0)</div>
+    </div>
+
+    <div class="plate"><div class="plate__head"><h4>Card states</h4></div><div class="plate__body">
+      <div class="assets" style="padding:0; grid-template-columns:repeat(3,1fr)">
+        <div class="asset"><figure><svg><use href="#i-rock"/></svg></figure><span>Default</span></div>
+        <div class="asset on"><figure><svg><use href="#i-rock"/></svg></figure><span>Selected</span></div>
+        <div class="asset"><figure><svg><use href="#i-user"/></svg></figure><span>Your mini</span><span class="tag tag--local">You</span></div>
+      </div>
+      <p class="note" style="margin:var(--s4) 0 8px">Custom miniatures from the Forge sit in the same grid, tagged so you can tell yours from the shipped set.</p>
+      <div class="field" style="margin:0"><span class="label">Location in the world</span>
+        <select class="select"><option>Emberfall Crossing — Town</option><option>The Ashen Deep — Dungeon</option><option>Greywater Road — Wilderness</option></select></div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>What ships</h4></div><div class="plate__body" style="font-size:12px; color:var(--text-dim); line-height:1.65">
+      <p style="margin:0 0 8px"><b style="color:var(--text); font-weight:500">Architecture</b><br>Stone floor, wood floor, stone wall, timber wall, wooden door, stone pillar, dirt road, town house, guild hall, wood fence, stone bridge</p>
+      <p style="margin:0 0 8px"><b style="color:var(--text); font-weight:500">Nature</b><br>Grass tile, pine tree, dead tree, rock, water tile</p>
+      <p style="margin:0 0 8px"><b style="color:var(--text); font-weight:500">Props</b><br>Round table, long table, chair, crate, barrel, treasure chest, market stall</p>
+      <p style="margin:0 0 8px"><b style="color:var(--text); font-weight:500">Effects</b><br>Torch, campfire, story beacon</p>
+      <p style="margin:0 0 8px"><b style="color:var(--text); font-weight:500">Miniatures</b><br>Hero, rogue, orc, monster</p>
+      <p style="margin:0"><b style="color:var(--text); font-weight:500">Kenney CC0</b><br>Barrel, chair, chest, column, gate, rocks, stairs, table, trap, wall, half wall, human, orc</p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ MAP ============ -->
+<section class="sec" id="map">
+  <div class="sec__head">
+    <h2>Map and viewport</h2>
+    <p>Chrome floats at the four corners so the middle of the table stays clear.</p>
+  </div>
+  <div class="viewport" style="height:300px; border:1px solid var(--rule); border-radius:var(--r-card)">
+    <div class="viewport__grid"></div>
+    <div class="selmark" style="left:42%; top:40%"><b>Treasure chest · hidden from players</b><i></i><i></i><i></i><i></i></div>
+    <div class="vp-tl"><div class="vp-bar">
+      <button class="iconbtn on" title="Select"><svg><use href="#i-cube"/></svg></button>
+      <button class="iconbtn on" title="Grid"><svg><use href="#i-grid"/></svg></button>
+      <button class="iconbtn" title="Rotate"><svg><use href="#i-rotate"/></svg></button>
+      <button class="iconbtn" title="Recentre"><svg><use href="#i-refresh"/></svg></button>
+    </div></div>
+    <div class="vp-tr"><div class="placing">Placing <em>Torch</em><button class="btn btn--ghost btn--sm">Cancel</button></div></div>
+    <div class="vp-bl"><div class="hints">
+      <span><span class="kbd">G</span> Grid</span><span><span class="kbd">R</span> Rotate</span>
+      <span><span class="kbd">Del</span> Remove</span><span><span class="kbd">Esc</span> Cancel</span>
+    </div></div>
+    <div class="vp-br"><div class="hints"><span class="mono">Emberfall Crossing · tavern · 40 × 40</span></div></div>
+  </div>
+
+  <div class="grid g3" style="margin-top:var(--s4)">
+    <div class="plate"><div class="plate__head"><h4>Generate a world</h4></div><div class="plate__body">
+      <div class="field"><span class="label">Kind of place</span>
+        <select class="select"><option>Capital</option><option>City</option><option selected>Town</option><option>Village</option><option>Wilderness</option><option>Dungeon</option><option>Landmark</option></select></div>
+      <div class="switch on"><span>Lay out roads</span><i></i></div>
+      <div class="switch on"><span>Drop story points of interest</span><i></i></div>
+      <button class="btn btn--arcane btn--wide" style="margin-top:8px"><svg><use href="#i-sparkle"/></svg>Generate campaign</button>
+      <p class="attrib" style="margin-top:9px">Planned by your local model. Nothing leaves this machine.</p>
+    </div></div>
+    <div class="plate"><div class="plate__head"><h4>Themes</h4></div><div class="plate__body">
+      <div class="row" style="margin:0">
+        <span class="chip on">Dungeon</span><span class="chip">Tavern</span><span class="chip">Forest</span><span class="chip">Ruins</span>
+        <span class="chip">Cavern</span><span class="chip">City</span><span class="chip">Town</span><span class="chip">Village</span>
+        <span class="chip">Plains</span><span class="chip">Mountains</span><span class="chip">Coast</span><span class="chip">Swamp</span>
+      </div>
+    </div></div>
+    <div class="plate"><div class="plate__head"><h4>Map</h4></div><div class="plate__body">
+      <div class="field"><span class="label">Name</span><input class="input" value="Emberfall Crossing"></div>
+      <div class="field"><span class="label">Size in squares</span>
+        <div class="row" style="margin:0; gap:7px"><input class="input input--mono" value="40" style="width:70px">
+          <span style="color:var(--text-faint)">×</span><input class="input input--mono" value="40" style="width:70px"></div></div>
+      <div class="switch on" style="margin:0"><span>Show grid</span><i></i></div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ INSPECTOR ============ -->
+<section class="sec" id="inspector">
+  <div class="sec__head">
+    <h2>Object inspector</h2>
+    <p>Numeric fields are monospaced so x, y, and z stay in a column while you type.</p>
+  </div>
+  <div class="grid g3" style="align-items:start">
+    <div class="plate">
+      <div class="insp-sec"><div class="row" style="margin:0; justify-content:space-between">
+        <b class="dispname">Treasure chest</b><span class="tag tag--free">CC0</span></div></div>
+      <div class="insp-sec"><span class="label">Position</span>
+        <div class="xyz">
+          <label><span class="label">x</span><input class="input" value="18.0"></label>
+          <label><span class="label">y</span><input class="input" value="0.0"></label>
+          <label><span class="label">z</span><input class="input" value="7.5"></label></div></div>
+      <div class="insp-sec">
+        <div class="row" style="justify-content:space-between; margin-bottom:8px">
+          <span class="label" style="margin:0">Rotation</span><button class="btn btn--ghost btn--sm">Reset</button></div>
+        <div class="xyz">
+          <label><span class="label">x</span><input class="input" value="0"></label>
+          <label><span class="label">y</span><input class="input" value="45"></label>
+          <label><span class="label">z</span><input class="input" value="0"></label></div></div>
+      <div class="insp-sec"><span class="label">Scale</span>
+        <div class="xyz">
+          <label><span class="label">x</span><input class="input" value="1.00"></label>
+          <label><span class="label">y</span><input class="input" value="1.00"></label>
+          <label><span class="label">z</span><input class="input" value="1.00"></label></div>
+        <div class="switch on" style="margin-top:6px"><span>Scale evenly</span><i></i></div></div>
+      <div class="insp-sec" style="border:0">
+        <span class="label">Attribution</span>
+        <p class="attrib" style="margin:0">Chest by Kenney · CC0 1.0 · kenney.nl/assets<br>Free to use, modify, and ship without credit.</p></div>
+    </div>
+
+    <div class="plate"><div class="plate__head"><h4>Miniature sizing</h4></div>
+      <div class="insp-sec"><span class="label">Creature size</span>
+        <div class="presets"><button>Small</button><button class="on">Medium</button><button>Large</button><button>Huge</button></div></div>
+      <div class="insp-sec"><span class="label">Squares occupied</span>
+        <div class="row" style="margin:0; gap:7px">
+          <input class="input input--mono" value="1" style="width:56px"><span style="color:var(--text-faint)">×</span>
+          <input class="input input--mono" value="1" style="width:56px">
+          <span style="font-size:11.5px; color:var(--text-faint)">5 ft square</span></div></div>
+      <div class="insp-sec" style="border:0"><span class="label">Model scale</span>
+        <input type="range" value="50">
+        <p class="attrib" style="margin:2px 0 0">1.00× — matches the shipped miniatures</p></div>
+    </div>
+
+    <div class="plate"><div class="plate__head"><h4>Visibility and notes</h4></div>
+      <div class="insp-sec"><span class="label">Notes for you only</span>
+        <textarea class="input" rows="4">Trapped. Thieves' tools DC 15, otherwise 2d10 poison to whoever opens it.</textarea></div>
+      <div class="insp-sec">
+        <div class="switch"><span>Visible to players</span><i></i></div>
+        <div class="switch on"><span>Locked in place</span><i></i></div></div>
+      <div class="insp-sec" style="display:flex; gap:7px; border:0">
+        <button class="btn btn--sm" style="flex:1"><svg><use href="#i-copy"/></svg>Duplicate</button>
+        <button class="btn btn--danger btn--sm" style="flex:1"><svg><use href="#i-trash"/></svg>Delete</button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCENERY ============ -->
+<section class="sec" id="scenery">
+  <div class="sec__head">
+    <h2>Scenery Studio</h2>
+    <p>Panoramas and splats generated on your own GPU. Violet throughout — this is the AI surface.</p>
+  </div>
+  <div class="grid g3" style="align-items:start">
+    <div class="plate">
+      <div class="plate__head"><h4>New scenery</h4><span class="dot dot--ai">ComfyUI ready</span></div>
+      <div class="insp-sec">
+        <div class="seg seg--arcane" style="width:100%"><button class="on" style="flex:1">Describe it</button><button style="flex:1">Upload a panorama</button></div>
+      </div>
+      <div class="insp-sec"><span class="label">What should the scene look like?</span>
+        <textarea class="input" rows="3">A harbour under two moons, wet stone quay, fishing boats with amber lanterns, fog rolling in off black water.</textarea></div>
+      <div class="insp-sec">
+        <div class="row" style="margin:0; justify-content:space-between">
+          <span class="label" style="margin:0">Generating panorama</span><span class="mono" style="font-size:11px; color:var(--arcane-soft)">62%</span></div>
+        <div class="progress" style="margin:8px 0"><b style="width:62%"></b></div>
+        <div class="row" style="margin:0; gap:7px">
+          <button class="btn btn--sm"><svg><use href="#i-stop"/></svg>Cancel</button>
+          <span style="font-size:11.5px; color:var(--text-faint)">Step 14 of 22 · about 40s left</span></div>
+      </div>
+      <div class="insp-sec" style="border:0">
+        <button class="btn btn--arcane btn--wide" disabled><svg><use href="#i-sparkle"/></svg>Generate scenery</button>
+      </div>
+    </div>
+
+    <div class="plate">
+      <div class="plate__head"><h4>Bring your own</h4></div>
+      <div class="plate__body">
+        <div class="drop" style="margin-bottom:9px"><svg><use href="#i-image"/></svg>
+          <b>Drop a 2:1 panorama</b><small>JPG, PNG, or EXR · 4096 × 2048 or larger</small></div>
+        <div class="drop" style="margin-bottom:9px"><svg><use href="#i-cube"/></svg>
+          <b>Drop a splat</b><small>PLY, compressed PLY, or SOG</small></div>
+        <p class="label">Workflows</p>
+        <div class="grid" style="gap:6px; margin-bottom:9px">
+          <div class="filerow"><svg><use href="#i-folder"/></svg>panorama_sdxl.json<small class="push">18 KB</small>
+            <button class="iconbtn" style="width:22px;height:22px"><svg><use href="#i-x"/></svg></button></div>
+          <button class="btn btn--sm btn--wide"><svg><use href="#i-upload"/></svg>Upload splat workflow</button>
+        </div>
+        <div class="row" style="margin:0; gap:7px">
+          <button class="btn btn--sm"><svg><use href="#i-refresh"/></svg>Test connection</button>
+          <span class="dot dot--live">127.0.0.1:8188</span></div>
+      </div>
+    </div>
+
+    <div class="plate">
+      <div class="plate__head"><h4>Inspiration</h4><span style="font-size:11px; color:var(--text-faint)">Works offline</span></div>
+      <div class="plate__body">
+        <div class="search" style="margin-bottom:9px"><svg><use href="#i-search"/></svg><input class="input" placeholder="Search 12 scenes"></div>
+        <div class="insp-grid">
+          <div class="inspo"><i style="background:linear-gradient(160deg,#26344f,#8ea7c4)"></i><span>Moonlit harbour</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#1f3a2a,#6f9a5c)"></i><span>Forest shrine</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#3b3f4d,#a9b0bd)"></i><span>Mountain citadel</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#5c452a,#d8b171)"></i><span>Caravanserai</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#1d3b40,#5aa39c)"></i><span>Sunken temple</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#3d2b52,#b48fd6)"></i><span>Feywild village</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#4a2018,#d9622f)"></i><span>Volcanic tower</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#2f4653,#c3d8e4)"></i><span>Frozen fishing town</span></div>
+          <div class="inspo"><i style="background:linear-gradient(160deg,#2a2f52,#7f9bd6)"></i><span>Crystal city</span></div>
+        </div>
+        <p class="attrib" style="margin-top:9px">Also: pastoral crossroads, gothic capital, floating sky ruins.<br>
+          Free HDRIs at <a href="#scenery">Poly Haven</a> · splat tools at <a href="#scenery">SplatKit</a> and <a href="#scenery">Brush</a>.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="plate" style="margin-top:var(--s4)">
+    <div class="plate__head"><h4>Scenery on this map</h4><span style="font-size:11px; color:var(--text-faint)">2 attached</span></div>
+    <div class="plate__body">
+      <div class="listrow"><span class="tag tag--local">Splat</span><b>Moonlit harbour</b>
+        <span class="mono push" style="color:var(--text-faint); font-size:11px">harbour_night.sog · 84 MB</span>
+        <button class="iconbtn"><svg><use href="#i-eye"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-trash"/></svg></button></div>
+      <div class="listrow"><span class="tag tag--free">HDRI</span><b>Overcast sky</b>
+        <span class="mono push" style="color:var(--text-faint); font-size:11px">kloppenheim_02_4k.exr · 22 MB</span>
+        <button class="iconbtn"><svg><use href="#i-eye"/></svg></button>
+        <button class="iconbtn"><svg><use href="#i-trash"/></svg></button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CHARACTER SHEET ============ -->
+<section class="sec" id="sheet">
+  <div class="sec__head">
+    <h2>Character sheet</h2>
+    <p>The one pale surface in the app. Everything a player writes on is vellum, everything the app owns is leather.</p>
+  </div>
+
+  <div class="plate" style="margin-bottom:var(--s4)">
+    <div class="plate__head">
+      <h4>Party</h4>
+      <div class="row" style="margin:0; gap:6px">
+        <button class="btn btn--sm"><svg><use href="#i-upload"/></svg>Import PDF or JSON</button>
+        <button class="btn btn--sm"><svg><use href="#i-download"/></svg>Export</button>
+        <button class="btn btn--primary btn--sm"><svg><use href="#i-plus"/></svg>New character</button>
+      </div>
+    </div>
+    <div class="plate__body">
+      <div class="party">
+        <div class="pcard on"><header><div class="avatar avatar--sm">TR</div><div><b>Thalia</b><small>Ranger 5</small></div></header>
+          <div class="meter"><b style="width:83%"></b></div><div class="mono"><span>34/41</span><span>AC 17</span></div></div>
+        <div class="pcard"><header><div class="avatar avatar--sm">BR</div><div><b>Bram</b><small>Cleric 5</small></div></header>
+          <div class="meter meter--hurt"><b style="width:48%"></b></div><div class="mono"><span>19/40</span><span>AC 18</span></div></div>
+        <div class="pcard"><header><div class="avatar avatar--sm">NX</div><div><b>Nix</b><small>Rogue 5</small></div></header>
+          <div class="meter meter--crit"><b style="width:14%"></b></div><div class="mono"><span>5/35</span><span>AC 15</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid" style="grid-template-columns:1.6fr 1fr; align-items:start">
+    <div class="grid" style="gap:var(--s4)">
+      <div class="plate"><div class="plate__body">
+        <div class="row" style="margin:0 0 var(--s4); flex-wrap:nowrap; align-items:flex-start">
+          <div class="portrait"><svg><use href="#i-user"/></svg></div>
+          <div style="flex:1">
+            <input class="input" value="Thalia Ravenmark" style="font-family:var(--font-display); font-size:17px; margin-bottom:7px">
+            <div class="grid g3" style="gap:7px">
+              <label><span class="label">Ancestry</span><input class="input" value="Half-elf"></label>
+              <label><span class="label">Class</span><input class="input" value="Ranger"></label>
+              <label><span class="label">Level</span><input class="input input--mono" value="5"></label>
+            </div>
+          </div>
+        </div>
+        <div class="vitals" style="margin-bottom:var(--s4)">
+          <div class="vital"><span class="label">Hit points</span><b>34</b><small> / 41</small>
+            <div class="meter" style="margin-top:7px"><b style="width:83%"></b></div></div>
+          <div class="vital"><span class="label">Armour class</span><b>17</b></div>
+          <div class="vital"><span class="label">Speed</span><b>35</b><small> ft</small></div>
+        </div>
+        <div class="abilities">
+          <div class="ability"><span class="label">Str</span><b>12</b><em>+1</em></div>
+          <div class="ability"><span class="label">Dex</span><b>18</b><em>+4</em></div>
+          <div class="ability"><span class="label">Con</span><b>14</b><em>+2</em></div>
+          <div class="ability"><span class="label">Int</span><b>10</b><em>+0</em></div>
+          <div class="ability"><span class="label">Wis</span><b>16</b><em>+3</em></div>
+          <div class="ability"><span class="label">Cha</span><b>11</b><em>+0</em></div>
+        </div>
+      </div></div>
+
+      <div class="plate"><div class="plate__head"><h4>Actions</h4><button class="btn btn--ghost btn--sm"><svg><use href="#i-plus"/></svg>Add</button></div>
+        <div class="plate__body">
+          <div class="listrow"><svg style="width:14px;height:14px;stroke:var(--text-faint);fill:none;stroke-width:1.5"><use href="#i-sword"/></svg>
+            <b>Longbow</b><span class="mono push">+7 to hit</span><span class="mono">1d8+4 piercing</span>
+            <button class="btn btn--sm">Roll</button></div>
+          <div class="listrow"><svg style="width:14px;height:14px;stroke:var(--text-faint);fill:none;stroke-width:1.5"><use href="#i-sword"/></svg>
+            <b>Shortsword</b><span class="mono push">+7 to hit</span><span class="mono">1d6+4 slashing</span>
+            <button class="btn btn--sm">Roll</button></div>
+          <div class="listrow"><svg style="width:14px;height:14px;stroke:var(--text-faint);fill:none;stroke-width:1.5"><use href="#i-sparkle"/></svg>
+            <b>Hunter's Mark</b><span class="mono push">Bonus action</span><span class="mono">1d6 extra</span>
+            <button class="btn btn--sm">Roll</button></div>
+        </div></div>
+
+      <div class="plate"><div class="plate__head"><h4>Inventory</h4><button class="btn btn--ghost btn--sm"><svg><use href="#i-plus"/></svg>Add</button></div>
+        <div class="plate__body">
+          <div class="listrow"><b>Studded leather</b><span class="push tag tag--free">Equipped</span><span class="mono">×1</span>
+            <button class="iconbtn"><svg><use href="#i-trash"/></svg></button></div>
+          <div class="listrow"><b>Arrows</b><span class="mono push">×37</span>
+            <button class="iconbtn"><svg><use href="#i-trash"/></svg></button></div>
+          <div class="listrow"><b>Potion of healing</b><span class="mono push">×2</span>
+            <button class="iconbtn"><svg><use href="#i-trash"/></svg></button></div>
+        </div></div>
+    </div>
+
+    <div class="grid" style="gap:var(--s4)">
+      <div class="plate"><div class="plate__head"><h4>Damage and healing</h4></div><div class="plate__body">
+        <div class="row" style="gap:7px; flex-wrap:nowrap">
+          <input class="input input--mono" value="8" style="width:62px; text-align:center">
+          <select class="select"><option>Slashing</option><option>Piercing</option><option>Fire</option><option>Poison</option><option>Necrotic</option></select>
+        </div>
+        <div class="row" style="gap:7px; margin:0">
+          <button class="btn btn--danger" style="flex:1"><svg><use href="#i-minus"/></svg>Damage</button>
+          <button class="btn btn--primary" style="flex:1"><svg><use href="#i-heart"/></svg>Heal</button>
+        </div>
+      </div></div>
+
+      <div class="plate"><div class="plate__head"><h4>Rest and recovery</h4></div><div class="plate__body">
+        <div class="row" style="gap:7px"><button class="btn btn--sm" style="flex:1">Short rest</button>
+          <button class="btn btn--sm" style="flex:1">Long rest</button></div>
+        <div class="field"><span class="label">Hit dice — 3 of 5 left</span>
+          <div class="pips"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></div></div>
+        <div class="field"><span class="label">Death saves</span>
+          <div class="row" style="margin:0; gap:var(--s4)">
+            <span style="display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--text-faint)">Saved
+              <span class="pips pips--verd"><i class="on"></i><i></i><i></i></span></span>
+            <span style="display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--text-faint)">Failed
+              <span class="pips pips--wax"><i class="on"></i><i class="on"></i><i></i></span></span>
+          </div></div>
+        <div class="field" style="margin:0"><span class="label">Exhaustion — level 1</span>
+          <div class="pips pips--wax"><i class="on"></i><i></i><i></i><i></i><i></i><i></i></div></div>
+      </div></div>
+
+      <div class="plate"><div class="plate__head"><h4>Conditions</h4></div><div class="plate__body">
+        <div class="row" style="margin:0; gap:5px">
+          <span class="chip chip--cond">Blinded</span><span class="chip chip--cond">Charmed</span><span class="chip chip--cond">Deafened</span>
+          <span class="chip chip--cond on">Frightened</span><span class="chip chip--cond">Grappled</span><span class="chip chip--cond">Incapacitated</span>
+          <span class="chip chip--cond">Invisible</span><span class="chip chip--cond">Paralysed</span><span class="chip chip--cond">Petrified</span>
+          <span class="chip chip--cond on">Poisoned</span><span class="chip chip--cond">Prone</span><span class="chip chip--cond">Restrained</span>
+          <span class="chip chip--cond">Stunned</span><span class="chip chip--cond">Unconscious</span>
+        </div>
+      </div></div>
+
+      <div class="plate"><div class="plate__head"><h4>Notes</h4></div><div class="plate__body">
+        <textarea class="input" rows="4">Owes a favour to the harbourmaster. Won't enter the Ashen Deep without Bram.</textarea>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ IMPORT ============ -->
+<section class="sec" id="import">
+  <div class="sec__head">
+    <h2>Import review</h2>
+    <p>Nothing is written until you accept. Confidence is shown per field, not per file.</p>
+  </div>
+  <div class="grid" style="grid-template-columns:1.4fr 1fr; align-items:start">
+    <div class="plate">
+      <div class="plate__head"><h4>From thalia_lvl5.pdf</h4><span class="mono" style="font-size:11px; color:var(--text-faint)">18 fields found</span></div>
+      <div class="plate__body">
+        <div class="callout callout--warn" style="margin-bottom:var(--s3)"><svg><use href="#i-alert"/></svg>
+          <div><b>Three fields need a look</b>Speed, hit dice, and one inventory row came through unclear. Edit them before accepting.</div></div>
+        <div class="listrow"><span style="width:96px; color:var(--text-faint); font-size:11.5px">Name</span>
+          <b>Thalia Ravenmark</b><span class="conf conf--hi push"><span class="meter"><b style="width:98%"></b></span><span>98%</span></span></div>
+        <div class="listrow"><span style="width:96px; color:var(--text-faint); font-size:11.5px">Class</span>
+          <b>Ranger</b><span class="conf conf--hi push"><span class="meter"><b style="width:96%"></b></span><span>96%</span></span></div>
+        <div class="listrow"><span style="width:96px; color:var(--text-faint); font-size:11.5px">Level</span>
+          <b class="mono">5</b><span class="conf conf--hi push"><span class="meter"><b style="width:94%"></b></span><span>94%</span></span></div>
+        <div class="listrow"><span style="width:96px; color:var(--text-faint); font-size:11.5px">Armour class</span>
+          <b class="mono">17</b><span class="conf conf--mid push"><span class="meter"><b style="width:71%"></b></span><span>71%</span></span></div>
+        <div class="listrow"><span style="width:96px; color:var(--text-faint); font-size:11.5px">Speed</span>
+          <input class="input input--mono" value="35" style="width:70px">
+          <span class="conf conf--lo push"><span class="meter"><b style="width:38%"></b></span><span>38%</span></span></div>
+        <div class="listrow"><span style="width:96px; color:var(--text-faint); font-size:11.5px">Hit dice</span>
+          <input class="input input--mono" value="5d10" style="width:80px">
+          <span class="conf conf--lo push"><span class="meter"><b style="width:44%"></b></span><span>44%</span></span></div>
+      </div>
+      <div class="modal__foot"><button class="btn btn--ghost">Cancel</button><button class="btn btn--solid"><svg><use href="#i-check"/></svg>Accept draft</button></div>
+    </div>
+    <div class="plate"><div class="plate__head"><h4>Bring a character in</h4></div><div class="plate__body">
+      <div class="drop" style="margin-bottom:9px"><svg><use href="#i-upload"/></svg>
+        <b>Drop a character sheet</b><small>PDF export, or a DnDRom JSON file</small></div>
+      <p class="attrib">Reading happens on this machine. A D&amp;D Beyond sync isn't wired up yet — export a PDF from there and drop it here.</p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ FORGE ============ -->
+<section class="sec" id="forge">
+  <div class="sec__head">
+    <h2>Character Forge</h2>
+    <p>Drawing to textured miniature. Provider choice is explicit so people know what's running.</p>
+  </div>
+  <div class="grid g3" style="align-items:start">
+    <div class="plate"><div class="plate__head"><h4>Token</h4></div><div class="plate__body">
+      <div class="field"><span class="label">Name</span><input class="input" value="Ashjaw"></div>
+      <div class="field"><span class="label">Role on the map</span>
+        <div class="seg" style="width:100%"><button style="flex:1">Player</button><button style="flex:1">Enemy</button><button class="on" style="flex:1">Boss</button></div></div>
+      <div class="field"><span class="label">Link to a party member</span>
+        <select class="select"><option>Not linked</option><option>Thalia Ravenmark</option><option>Bram Oakhand</option></select></div>
+      <div class="field" style="margin:0"><span class="label">Reference drawing</span>
+        <div class="drop"><svg><use href="#i-image"/></svg><b>Drop a sketch</b><small>PNG or JPG · plain background works best</small></div></div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Generation</h4><span class="dot dot--ai">On your GPU</span></div><div class="plate__body">
+      <div class="field"><span class="label">Provider</span>
+        <div class="seg seg--arcane" style="width:100%"><button class="on" style="flex:1">Pixal3D</button><button style="flex:1">TRELLIS.2</button></div></div>
+      <div class="field"><span class="label">Workflow</span>
+        <div class="filerow"><svg><use href="#i-folder"/></svg>mini_trellis.json<small class="push">31 KB</small>
+          <button class="iconbtn" style="width:22px;height:22px"><svg><use href="#i-x"/></svg></button></div></div>
+      <div class="field"><span class="label">Mesh detail — 24,000 triangles</span><input type="range" value="62"></div>
+      <div class="field">
+        <div class="row" style="margin:0 0 7px; justify-content:space-between">
+          <span style="font-size:11.5px; color:var(--text-dim)">Texturing</span>
+          <span class="mono" style="font-size:11px; color:var(--arcane-soft)">78%</span></div>
+        <div class="progress"><b style="width:78%"></b></div></div>
+      <div class="row" style="gap:7px; margin:0">
+        <button class="btn btn--arcane" style="flex:1"><svg><use href="#i-sparkle"/></svg>Generate</button>
+        <button class="btn btn--sm"><svg><use href="#i-upload"/></svg>Import GLB</button></div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Base and scale</h4></div><div class="plate__body">
+      <div class="field"><span class="label">Base shape</span>
+        <div class="presets" style="grid-template-columns:repeat(3,1fr)"><button class="on">Round</button><button>Square</button><button>Hex</button></div></div>
+      <div class="grid g2" style="gap:7px; margin-bottom:var(--s3)">
+        <label><span class="label">Base colour</span><input class="input input--mono" value="#2b3440"></label>
+        <label><span class="label">Rim</span><input class="input input--mono" value="#c9a227"></label></div>
+      <div class="field"><span class="label">Base footprint</span>
+        <div class="presets"><button class="on">1×1</button><button>2×2</button><button>3×3</button><button>4×4</button></div></div>
+      <div class="field"><span class="label">Normalise model to</span><input type="range" value="55"></div>
+      <button class="btn btn--primary btn--wide"><svg><use href="#i-plus"/></svg>Add to library</button>
+      <p class="attrib" style="margin-top:9px">Everything here runs on your machine. No sketch or model is uploaded.</p>
+    </div></div>
+  </div>
+
+  <div class="plate" style="margin-top:var(--s4)">
+    <div class="plate__head"><h4>Your miniatures</h4><span style="font-size:11px; color:var(--text-faint)">4 forged</span></div>
+    <div class="plate__body">
+      <div class="assets" style="padding:0; grid-template-columns:repeat(6,1fr)">
+        <div class="asset"><figure><svg><use href="#i-user"/></svg></figure><span>Thalia</span><span class="tag tag--local">You</span></div>
+        <div class="asset"><figure><svg><use href="#i-user"/></svg></figure><span>Bram</span><span class="tag tag--local">You</span></div>
+        <div class="asset"><figure><svg><use href="#i-sword"/></svg></figure><span>Ashjaw</span><span class="tag tag--boss">Boss</span></div>
+        <div class="asset"><figure><svg><use href="#i-crown"/></svg></figure><span>Harbourmaster</span><span class="tag tag--local">You</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLAY MODE ============ -->
+<section class="sec" id="playmode">
+  <div class="sec__head">
+    <h2>Play mode</h2>
+    <p>Build chrome gets out of the way. Party along the top, your own character at the bottom.</p>
+  </div>
+  <div class="viewport" style="height:330px; border:1px solid var(--rule); border-radius:var(--r-card)">
+    <div class="viewport__grid" style="opacity:.28"></div>
+    <div style="position:absolute; top:12px; left:12px; right:12px; display:flex; gap:9px; align-items:flex-start">
+      <div class="party">
+        <div class="pcard on"><header><div class="avatar avatar--sm">TR</div><div><b>Thalia</b><small>Ranger 5</small></div></header>
+          <div class="meter"><b style="width:83%"></b></div><div class="mono"><span>34/41</span><span>AC 17</span></div></div>
+        <div class="pcard"><header><div class="avatar avatar--sm">BR</div><div><b>Bram</b><small>Cleric 5</small></div></header>
+          <div class="meter meter--hurt"><b style="width:48%"></b></div><div class="mono"><span>19/40</span><span>AC 18</span></div></div>
+        <div class="pcard"><header><div class="avatar avatar--sm">NX</div><div><b>Nix</b><small>Rogue 5</small></div></header>
+          <div class="meter meter--crit"><b style="width:14%"></b></div><div class="mono"><span>5/35</span><span>AC 15</span></div></div>
+      </div>
+    </div>
+
+    <div style="position:absolute; left:50%; top:44%; transform:translate(-50%,-50%); width:min(390px,84%)">
+      <div class="plate plate--raised" style="box-shadow:var(--shadow-pop)">
+        <div class="plate__head"><h4>The bridge at Emberfall</h4><span class="tag tag--local">Story beat</span></div>
+        <div class="plate__body" style="font-family:var(--font-display); font-size:13.5px; line-height:1.7; color:var(--text-dim)">
+          Two moons on black water, and the toll-keeper's hut dark for the third night running. The boards are wet with something that isn't river.
+        </div>
+      </div>
+    </div>
+
+    <div style="position:absolute; bottom:12px; left:12px; right:12px; display:flex; gap:9px; align-items:flex-end">
+      <div class="hud">
+        <div class="avatar">TR</div>
+        <div><b class="dispname" style="font-size:15px; display:block">Thalia Ravenmark</b>
+          <span style="font-size:10.5px; color:var(--text-faint)">Ranger 5 · half-elf</span></div>
+        <div class="hud__stat" style="margin-left:8px"><span>Hit points</span>34<span style="display:inline; color:var(--text-faint)"> / 41</span></div>
+        <div class="hud__stat"><span>Armour</span>17</div>
+      </div>
+      <div class="vp-bar" style="margin-left:auto">
+        <button class="btn btn--sm"><svg><use href="#i-sword"/></svg>Longbow</button>
+        <button class="btn btn--sm"><svg><use href="#i-sparkle"/></svg>Hunter's Mark</button>
+        <button class="btn btn--sm"><svg><use href="#i-d20"/></svg>Perception</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DM ============ -->
+<section class="sec" id="dm">
+  <div class="sec__head">
+    <h2>Dungeon Master</h2>
+    <p>Narration is set as a page of a book, drop cap and all. Rolls are struck plates, never chat bubbles.</p>
+  </div>
+  <div class="grid" style="grid-template-columns:1.3fr 1fr; align-items:start">
+    <div class="plate">
+      <div class="plate__head"><h4>Dungeon Master</h4><span class="dot dot--ai">Thinking</span></div>
+      <div class="log">
+        <div class="msg msg--dm">
+          <div class="msg__meta"><span class="msg__who">Dungeon Master</span><span class="mono">21:04</span></div>
+          <p>The toll-keeper's hut is dark. As you set foot on the bridge, the boards give under you — wet, and warm.</p>
+        </div>
+        <div class="msg msg--pc">
+          <div class="msg__meta"><span class="msg__who">Thalia</span><span class="mono">21:05</span></div>
+          <p>I crouch and look at the boards. What am I standing in?</p>
+        </div>
+        <div class="roll roll--pass">
+          <div class="roll__die">18</div>
+          <div class="roll__d"><b>Perception</b>d20 + 6 = 24 · DC 15</div>
+          <div class="roll__out">Success</div>
+        </div>
+        <div class="msg msg--dm">
+          <div class="msg__meta"><span class="msg__who">Dungeon Master</span><span class="mono">21:05</span></div>
+          <p>Blood, thinned by river spray, running back toward the far bank in a dragged smear about the width of a person.</p>
+        </div>
+        <div class="roll roll--fail">
+          <div class="roll__die">4</div>
+          <div class="roll__d"><b>Dexterity save</b>d20 + 3 = 7 · DC 14</div>
+          <div class="roll__out">Failed</div>
+        </div>
+        <div class="msg msg--sys">
+          <div class="msg__meta"><span class="msg__who">System</span><span class="mono">21:06</span></div>
+          <p>Bram takes 9 piercing damage · 19/40</p>
+        </div>
+        <div class="row" style="margin:0; gap:6px">
+          <span class="chip chip--action">Follow the smear</span>
+          <span class="chip chip--action">Call out to the hut</span>
+          <span class="chip chip--action">Ready an arrow</span>
+        </div>
+      </div>
+      <div class="composer">
+        <p class="label">Quick rolls</p>
+        <div class="dice" style="margin-bottom:9px">
+          <button>d20</button><button>d4</button><button>d6</button><button>d8</button><button>d10</button><button>d12</button><button>d100</button>
+        </div>
+        <div class="composer__box">
+          <button class="iconbtn mic on" title="Stop listening"><svg><use href="#i-mic"/></svg></button>
+          <textarea class="input" placeholder="What do you do?">I nock an arrow and follow the smear</textarea>
+          <button class="btn btn--solid"><svg><use href="#i-send"/></svg>Send</button>
+        </div>
+        <p class="transcript"><b>Hearing you:</b> "I nock an arrow and follow the…"</p>
+      </div>
+    </div>
+
+    <div class="grid" style="gap:var(--s4)">
+      <div class="plate"><div class="plate__head"><h4>Message states</h4></div><div class="plate__body">
+        <div class="row" style="margin:0 0 var(--s3); gap:var(--s4)">
+          <span class="dot dot--live">Ready</span><span class="dot dot--ai">Thinking</span><span class="dot dot--busy">Speaking</span>
+        </div>
+        <div class="row" style="margin:0 0 var(--s3)">
+          <button class="btn btn--sm btn--danger"><svg><use href="#i-stop"/></svg>Interrupt</button>
+          <span style="font-size:11.5px; color:var(--text-faint)">Cuts narration mid-sentence</span>
+        </div>
+        <div class="roll" style="margin-bottom:9px">
+          <div class="roll__die">12</div><div class="roll__d"><b>Damage</b>2d6 + 5</div>
+          <div class="roll__out" style="background:var(--brass-wash); color:var(--brass-bright)">Rolled</div>
+        </div>
+        <div class="callout callout--ai"><svg><use href="#i-sparkle"/></svg>
+          <div><b>The DM runs on your machine</b>Narration and rulings come from your local model. No session text is sent anywhere.</div></div>
+      </div></div>
+
+      <div class="plate"><div class="plate__head"><h4>Rules coverage</h4></div><div class="plate__body">
+        <div class="listrow"><b>Combat and initiative</b><span class="dot dot--live push">Full</span></div>
+        <div class="listrow"><b>Conditions</b><span class="dot dot--live push">Full</span></div>
+        <div class="listrow"><b>Spellcasting</b><span class="dot dot--busy push">Partial</span></div>
+        <div class="listrow"><b>Crafting and downtime</b><span class="dot dot--off push">Not yet</span></div>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SESSION ============ -->
+<section class="sec" id="session">
+  <div class="sec__head">
+    <h2>Session</h2>
+    <p>Campaign files, the local model, and the table connection.</p>
+  </div>
+  <div class="grid g3" style="align-items:start">
+    <div class="plate"><div class="plate__head"><h4>Campaign</h4><span class="dot dot--live">Saved 12:04</span></div><div class="plate__body">
+      <button class="btn btn--solid btn--wide" style="margin-bottom:7px"><svg><use href="#i-save"/></svg>Save campaign</button>
+      <div class="row" style="gap:7px; margin:0 0 var(--s4)">
+        <button class="btn btn--sm" style="flex:1"><svg><use href="#i-download"/></svg>Export</button>
+        <button class="btn btn--sm" style="flex:1"><svg><use href="#i-upload"/></svg>Import</button></div>
+      <p class="attrib" style="margin-bottom:var(--s4)">Saved to your documents folder as a single file you can copy, back up, or hand to another DM.</p>
+      <button class="btn btn--danger btn--wide"><svg><use href="#i-trash"/></svg>Reset campaign</button>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Local model</h4><span class="dot dot--live">Responding</span></div><div class="plate__body">
+      <div class="field"><span class="label">Endpoint</span><input class="input input--mono" value="http://127.0.0.1:11434"></div>
+      <div class="field"><span class="label">Model</span><input class="input input--mono" value="llama3.1:8b-instruct-q5_K_M"></div>
+      <button class="btn btn--sm btn--wide" style="margin-bottom:var(--s3)"><svg><use href="#i-refresh"/></svg>Test model</button>
+      <div class="switch on"><span>Let the DM plan maps</span><i></i></div>
+      <div class="switch"><span>Read narration aloud</span><i></i></div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Table</h4><span class="dot dot--live">3 connected</span></div><div class="plate__body">
+      <div class="field"><span class="label">Session server</span><input class="input input--mono" value="wss://table.dndrom.local:4400"></div>
+      <div class="field"><span class="label">Room code</span>
+        <div class="row" style="margin:0; gap:7px">
+          <input class="input input--mono" value="EMBER-4417" style="letter-spacing:.06em">
+          <button class="btn btn--sm"><svg><use href="#i-copy"/></svg></button></div></div>
+      <div class="field"><span class="label">Connection</span>
+        <div class="seg" style="width:100%"><button class="on" style="flex:1">Peer to peer</button><button style="flex:1">Through server</button></div></div>
+      <div class="row" style="gap:7px; margin:0">
+        <button class="btn btn--primary btn--sm" style="flex:1">Host</button>
+        <button class="btn btn--sm" style="flex:1">Join</button>
+        <button class="btn btn--danger btn--sm" style="flex:1">Disconnect</button></div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ STATES ============ -->
+<section class="sec" id="states">
+  <div class="sec__head">
+    <h2>States and feedback</h2>
+    <p>Messages say what happened and what to do. They don't apologise.</p>
+  </div>
+
+  <div class="grid g2" style="margin-bottom:var(--s4)">
+    <div class="plate"><div class="plate__head"><h4>Toasts</h4></div><div class="plate__body" style="display:grid; gap:9px">
+      <div class="toast toast--ok"><svg><use href="#i-check"/></svg><div><b>Campaign saved</b>The Vale of Ash · 12:04</div>
+        <button class="iconbtn"><svg><use href="#i-x"/></svg></button></div>
+      <div class="toast toast--info"><svg><use href="#i-info"/></svg><div><b>Ashjaw added to your library</b>Find it under Minis.</div>
+        <button class="iconbtn"><svg><use href="#i-x"/></svg></button></div>
+      <div class="toast toast--warn"><svg><use href="#i-alert"/></svg><div><b>Two players are still on the old map</b>They'll catch up when you save.</div>
+        <button class="iconbtn"><svg><use href="#i-x"/></svg></button></div>
+      <div class="toast toast--err"><svg><use href="#i-alert"/></svg><div><b>Ollama isn't answering on port 11434</b>Start it, then test the model again in Session.</div>
+        <button class="iconbtn"><svg><use href="#i-x"/></svg></button></div>
+    </div></div>
+
+    <div class="plate"><div class="plate__head"><h4>Callouts</h4></div><div class="plate__body" style="display:grid; gap:9px">
+      <div class="callout callout--ai"><svg><use href="#i-sparkle"/></svg>
+        <div><b>Everything runs locally</b>Generation uses your GPU. Your maps and characters never leave this machine.</div></div>
+      <div class="callout callout--warn"><svg><use href="#i-alert"/></svg>
+        <div><b>This splat is 84 MB</b>Players on a slow connection may wait a while for it to appear.</div></div>
+      <div class="callout callout--err"><svg><use href="#i-alert"/></svg>
+        <div><b>Couldn't read the workflow file</b>It needs to be a ComfyUI API-format JSON export, not the workflow save.</div></div>
+      <div class="callout callout--ok"><svg><use href="#i-check"/></svg>
+        <div><b>Model responded in 340ms</b>Fast enough for narration and rulings.</div></div>
+    </div></div>
+  </div>
+
+  <div class="grid g3" style="margin-bottom:var(--s4)">
+    <div class="plate"><div class="plate__body">
+      <div class="empty"><svg><use href="#i-map"/></svg>
+        <h4>Nothing placed yet</h4>
+        <p>Pick a floor tile from the library and click the grid to start the room.</p>
+        <button class="btn btn--primary btn--sm">Browse assets</button></div>
+    </div></div>
+    <div class="plate"><div class="plate__body">
+      <div class="empty"><svg><use href="#i-user"/></svg>
+        <h4>No one at the table</h4>
+        <p>Create a character or drop in a sheet you already have.</p>
+        <div class="row" style="justify-content:center; margin:0"><button class="btn btn--primary btn--sm">New character</button>
+          <button class="btn btn--sm">Import</button></div></div>
+    </div></div>
+    <div class="plate"><div class="plate__body">
+      <div class="empty"><svg><use href="#i-search"/></svg>
+        <h4>No assets match "portcullis"</h4>
+        <p>Try "gate" or "wall", or forge the piece you need.</p>
+        <button class="btn btn--arcane btn--sm"><svg><use href="#i-sparkle"/></svg>Open the Forge</button></div>
+    </div></div>
+  </div>
+
+  <div class="grid g2" style="margin-bottom:var(--s4)">
+    <div class="stage">
+      <div class="stage__back"></div>
+      <div class="modal">
+        <div class="modal__head"><h3>Reset this campaign?</h3>
+          <button class="iconbtn"><svg><use href="#i-x"/></svg></button></div>
+        <div class="modal__body">Every map, character, and session log in <b style="color:var(--text)">The Vale of Ash</b> is removed from this machine. Export first if you want to keep it.</div>
+        <div class="modal__foot"><button class="btn btn--ghost">Keep it</button>
+          <button class="btn btn--sm">Export first</button>
+          <button class="btn btn--danger">Reset campaign</button></div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="splash">
+        <svg class="crest" viewBox="0 0 32 32" fill="none">
+          <path d="M16 2.5 28 8v11c0 6-5.4 9.6-12 11.5C9.4 28.6 4 25 4 19V8z" stroke="#7d5f21" stroke-width="1.2"/>
+          <path d="M16 6 24.5 10v8.2c0 4.2-3.8 6.8-8.5 8.2-4.7-1.4-8.5-4-8.5-8.2V10z" fill="#c9a227" fill-opacity=".1" stroke="#c9a227" stroke-width="1.1"/>
+          <path d="M16 11.5 18 16l4.5 1.5L18 19l-2 4.5-2-4.5-4.5-1.5L14 16z" fill="#c9a227"/>
+        </svg>
+        <h2>DnDRom</h2>
+        <p>Opening The Vale of Ash</p>
+        <div class="loadbar"><div class="progress"><b style="width:46%; background:var(--brass)"></b></div></div>
+        <p style="margin-top:11px; font-size:11px">Loading 43 assets and 2 scenery files</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid g3">
+    <div class="plate"><div class="plate__head"><h4>Loading</h4></div><div class="plate__body">
+      <div class="row"><span class="spinner"></span><span style="font-size:12px; color:var(--text-dim)">Reading the campaign file</span></div>
+      <div class="row"><span class="spinner spinner--arcane"></span><span style="font-size:12px; color:var(--text-dim)">Model is thinking</span></div>
+      <div class="progress" style="margin-top:6px"><b style="width:34%"></b></div>
+    </div></div>
+    <div class="plate"><div class="plate__head"><h4>Connection</h4></div><div class="plate__body" style="display:grid; gap:9px">
+      <span class="dot dot--live">Peer to peer · 3 players · 18ms</span>
+      <span class="dot dot--busy">Falling back to the relay server</span>
+      <span class="dot dot--err">Lost the table · retrying in 4s</span>
+      <span class="dot dot--off">Playing solo</span>
+    </div></div>
+    <div class="plate"><div class="plate__head"><h4>Recovery</h4></div><div class="plate__body">
+      <div class="callout callout--warn" style="margin-bottom:9px"><svg><use href="#i-alert"/></svg>
+        <div><b>DnDRom closed unexpectedly</b>There's a copy of The Vale of Ash from 21:06, about four minutes of play newer than your last save.</div></div>
+      <div class="row" style="margin:0; gap:7px">
+        <button class="btn btn--primary btn--sm" style="flex:1">Use the newer copy</button>
+        <button class="btn btn--sm" style="flex:1">Open last save</button></div>
+    </div></div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<script>
+const links = [...document.querySelectorAll('.kit__nav a')];
+const spy = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    links.forEach(a => a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id));
+  });
+}, { rootMargin: '-10% 0px -80% 0px' });
+document.querySelectorAll('.sec').forEach(s => spy.observe(s));
+
+// Demo-only interactivity so states are inspectable
+document.addEventListener('click', ev => {
+  const t = ev.target.closest('.switch, .chip, .asset, .seg button, .cats button, .presets button, .pips i, .rtabs button');
+  if (!t) return;
+  if (t.classList.contains('switch')) return t.classList.toggle('on');
+  if (t.classList.contains('chip') || t.classList.contains('asset')) return t.classList.toggle('on');
+  if (t.tagName === 'I') return t.classList.toggle('on');
+  [...t.parentElement.children].forEach(c => c.classList.remove('on'));
+  t.classList.add('on');
+});
+</script>
+</body>
+</html>

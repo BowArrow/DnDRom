@@ -1,25 +1,47 @@
 import { useMemo, useState } from "react";
-import { Boxes, Globe2, MapPin, Search, Sparkles, WandSparkles, X } from "lucide-react";
+import { Archive, Boxes, Check, Edit3, Globe2, Layers3, MapPin, MinusCircle, PackageOpen, Search, ShieldPlus, Sparkles, UserRound, WandSparkles, X } from "lucide-react";
 import { createStoryFirstCampaign } from "../ai/campaignDirector";
 import { generateAiMap } from "../ai/mapDirector";
 import { ASSET_CATALOG, ASSET_CATEGORIES } from "../domain/assets";
 import { generateLocationMap } from "../domain/mapGenerator";
+import { resolveTokenForms, resolveTokenStates } from "../domain/tokenAnimation";
 import { useCampaignStore } from "../state/campaignStore";
-import { WorldSplatPanel } from "./WorldSplatPanel";
+import { selectMaterialAssets, selectMaterialLibrary, selectMiniatureLibrary, selectPropAssets, selectPropLibrary, selectTokenAssets } from "../state/selectors";
+import { AssetThumbnail } from "./AssetThumbnail";
+import { AssetCatalogueDialog } from "./AssetCatalogueDialog";
+import { MaterialAssetPreview, PropAssetPreview } from "./StoredAssetPreview";
 
 interface AssetPaletteProps {
   onNotify: (message: string, tone?: "info" | "success" | "warning" | "error") => void;
+  onOpenSceneForge: () => void;
+  onOpenCharacterForge: (tokenId?: string) => void;
+  onOpenPropForge: (propId?: string) => void;
 }
 
-export function AssetPalette({ onNotify }: AssetPaletteProps) {
+export function AssetPalette({ onNotify, onOpenSceneForge, onOpenCharacterForge, onOpenPropForge }: AssetPaletteProps) {
   const [category, setCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [mapPrompt, setMapPrompt] = useState("A frontier realm where roads and entire towns are being erased from memory, with mystery, political choices, wilderness travel, and a climactic observatory");
   const [generating, setGenerating] = useState(false);
   const [showGenerator, setShowGenerator] = useState(false);
+  const [showTokenLibrary, setShowTokenLibrary] = useState(false);
+  const [showPropLibrary, setShowPropLibrary] = useState(false);
+  const [showMaterialLibrary, setShowMaterialLibrary] = useState(false);
   const activeAssetId = useCampaignStore((state) => state.activeAssetId);
   const setActiveAsset = useCampaignStore((state) => state.setActiveAsset);
   const settings = useCampaignStore((state) => state.campaign.settings);
+  const tokenAssets = useCampaignStore(selectTokenAssets);
+  const miniatureLibrary = useCampaignStore(selectMiniatureLibrary);
+  const propAssets = useCampaignStore(selectPropAssets);
+  const propLibrary = useCampaignStore(selectPropLibrary);
+  const materialAssets = useCampaignStore(selectMaterialAssets);
+  const materialLibrary = useCampaignStore(selectMaterialLibrary);
+  const addPropToCampaign = useCampaignStore((state) => state.addPropToCampaign);
+  const removePropFromCampaign = useCampaignStore((state) => state.removePropFromCampaign);
+  const addMaterialToCampaign = useCampaignStore((state) => state.addMaterialToCampaign);
+  const removeMaterialFromCampaign = useCampaignStore((state) => state.removeMaterialFromCampaign);
+  const addTokenToCampaign = useCampaignStore((state) => state.addTokenToCampaign);
+  const removeTokenFromCampaign = useCampaignStore((state) => state.removeTokenFromCampaign);
   const world = useCampaignStore((state) => state.campaign.world);
   const activeLocationId = useCampaignStore((state) => state.campaign.activeLocationId);
   const replaceMap = useCampaignStore((state) => state.replaceMap);
@@ -31,6 +53,11 @@ export function AssetPalette({ onNotify }: AssetPaletteProps) {
     const query = search.trim().toLowerCase();
     return inCategory && (!query || `${asset.name} ${asset.description}`.toLowerCase().includes(query));
   }), [category, search]);
+  const customTokens = useMemo(() => tokenAssets.filter((asset) => {
+    const query = search.trim().toLowerCase();
+    return (category === "all" || category === "tokens") && (!query || `${asset.name} ${asset.kind} custom miniature`.toLowerCase().includes(query));
+  }), [category, search, tokenAssets]);
+  const customProps = useMemo(() => propAssets.filter((asset) => { const query = search.trim().toLowerCase(); return (category === "all" || category === "furniture" || category === "effects") && (!query || `${asset.name} ${asset.description} ${asset.profile}`.toLowerCase().includes(query)); }), [category, propAssets, search]);
 
   const generateScene = async () => {
     if (!mapPrompt.trim()) return;
@@ -81,12 +108,17 @@ export function AssetPalette({ onNotify }: AssetPaletteProps) {
         <Boxes size={18} />
       </div>
 
-      <button className="generate-map-button" onClick={() => setShowGenerator(true)}>
+      <button className="creator-launch-button generate-map-button" onClick={() => setShowGenerator(true)}>
         <WandSparkles size={17} />
         <span><strong>Generate campaign</strong><small>Story first, then world and maps</small></span>
         <Sparkles size={14} />
       </button>
-      <WorldSplatPanel onNotify={onNotify} />
+      <button className="creator-launch-button splat-studio-button arcane-action" onClick={onOpenSceneForge}><Sparkles size={17} /><span><strong>AI scenery studio</strong><small>Open persistent scene workspace</small></span><WandSparkles size={14} /></button>
+      <button className="creator-launch-button token-studio-button" onClick={() => onOpenCharacterForge()}><UserRound size={17} /><span><strong>Character Forge</strong><small>Open persistent miniature workspace</small></span><ShieldPlus size={14} /></button>
+      <button className="creator-launch-button miniature-library-button" onClick={() => setShowTokenLibrary(true)}><Archive size={17} /><span><strong>Character catalogue</strong><small>Load saved tokens into this campaign or reopen them in Forge</small></span><span className="library-count">{tokenAssets.length}/{miniatureLibrary.length}</span></button>
+      <button className="creator-launch-button prop-studio-button" onClick={() => onOpenPropForge()}><PackageOpen size={17} /><span><strong>Prop Forge</strong><small>Create reviewed props and seamless PBR materials</small></span><WandSparkles size={14} /></button>
+      <button className="creator-launch-button prop-library-button" onClick={() => setShowPropLibrary(true)}><Archive size={17} /><span><strong>Prop catalogue</strong><small>Choose reusable props for this campaign</small></span><span className="library-count">{propAssets.length}/{propLibrary.length}</span></button>
+      <button className="creator-launch-button material-library-button" onClick={() => setShowMaterialLibrary(true)}><Layers3 size={17} /><span><strong>Material catalogue</strong><small>Reusable floor, wall, pillar, and general PBR themes</small></span><span className="library-count">{materialAssets.length}/{materialLibrary.length}</span></button>
 
       {world && (
         <section className="world-locations">
@@ -111,7 +143,7 @@ export function AssetPalette({ onNotify }: AssetPaletteProps) {
 
       <div className="asset-grid">
         <button className={`asset-card select-tool ${activeAssetId === null ? "active" : ""}`} onClick={() => setActiveAsset(null)} title="Select and inspect objects">
-          <span className="asset-icon">↖</span>
+          <AssetThumbnail assetId={null} />
           <span>Select</span>
           <small>Inspect</small>
         </button>
@@ -122,15 +154,28 @@ export function AssetPalette({ onNotify }: AssetPaletteProps) {
             onClick={() => setActiveAsset(activeAssetId === asset.id ? null : asset.id)}
             title={asset.description}
           >
-            <span className="asset-icon">{asset.icon}</span>
+            <AssetThumbnail assetId={asset.id} />
             <span>{asset.name}</span>
             <small>{asset.license === "CC0" ? "CC0" : asset.category}</small>
           </button>
         ))}
+        {customTokens.map((asset) => (
+          <button
+            key={asset.id}
+            className={`asset-card custom-token-card ${activeAssetId === asset.id ? "active" : ""}`}
+            onClick={() => setActiveAsset(activeAssetId === asset.id ? null : asset.id)}
+            title={`${asset.name} · ${asset.kind} · local GLB`}
+          >
+            <AssetThumbnail assetId={asset.id} token={asset} />
+            <span>{asset.name}</span>
+            <small>{asset.kind} · local</small>
+          </button>
+        ))}
+        {customProps.map((asset) => <button key={asset.id} className={`asset-card custom-prop-card ${activeAssetId === asset.id ? "active" : ""}`} onClick={() => setActiveAsset(activeAssetId === asset.id ? null : asset.id)} title={`${asset.name} · ${asset.profile} · ${asset.triangleCount.toLocaleString()} triangles`}><span className="asset-prop-glyph"><PackageOpen size={28} /></span><span>{asset.name}</span><small>{asset.profile}</small></button>)}
       </div>
 
       <div className="palette-footer">
-        <span>{ASSET_CATALOG.length} starter assets</span>
+        <span>{ASSET_CATALOG.length} starter + {tokenAssets.length + propAssets.length} custom</span>
         <span>Procedural + CC0</span>
       </div>
 
@@ -161,6 +206,9 @@ export function AssetPalette({ onNotify }: AssetPaletteProps) {
           </section>
         </div>
       )}
+      {showTokenLibrary && <AssetCatalogueDialog ariaLabel="Character catalogue" eyebrow={<><Archive size={13} /> Local character catalogue</>} title="Choose this campaign's character miniatures" description="Search reusable characters, preview their current model and base, reopen one in Character Forge, or control campaign membership." searchPlaceholder="Search characters, forms, or styles" onClose={() => setShowTokenLibrary(false)} empty={<div className="miniature-library-empty"><UserRound size={28} /><strong>No saved miniatures yet</strong><small>Create or import one in Character Forge and it will appear here automatically.</small><button className="primary-button" onClick={() => { setShowTokenLibrary(false); onOpenCharacterForge(); }}><ShieldPlus size={15} /> Open Character Forge</button></div>} items={miniatureLibrary.map((token) => { const inCampaign = tokenAssets.some((entry) => entry.id === token.id); const placed = useCampaignStore.getState().campaign.map.entities.filter((entry) => entry.assetId === token.id).length; return { id: token.id, name: token.name, searchText: `${token.kind} ${resolveTokenForms(token).map((form) => form.name).join(" ")} ${resolveTokenStates(token).map((state) => state.styleName ?? "").join(" ")}`, preview: <AssetThumbnail assetId={token.id} token={token} />, details: <>{token.kind} · {resolveTokenForms(token).length} forms · {resolveTokenStates(token).length} styles · {placed} placed</>, inCampaign, actions: <><button onClick={() => { setShowTokenLibrary(false); onOpenCharacterForge(token.id); }}><Edit3 size={14} /> Open in Forge</button>{inCampaign ? <button className="remove-campaign-token" onClick={() => { removeTokenFromCampaign(token.id); onNotify(`${token.name} was removed from this campaign${placed ? ` with ${placed} placed ${placed === 1 ? "copy" : "copies"}` : ""}. The library model is still saved.`, "success"); }}><MinusCircle size={14} /> Remove from campaign</button> : <button className="primary-button" onClick={() => { addTokenToCampaign(token.id); onNotify(`${token.name} is now available in this campaign's Minis.`, "success"); }}><ShieldPlus size={14} /> Add to campaign</button>}</>, status: inCampaign ? <span className="campaign-token-status"><Check size={12} /> Available in Minis</span> : undefined }; })} />}
+      {showPropLibrary && <AssetCatalogueDialog ariaLabel="Prop catalogue" eyebrow={<><Archive size={13} /> Local prop catalogue</>} title="Choose this campaign's props" description="Search the reusable device catalogue, inspect each approved reference, and control campaign membership without deleting the saved model." searchPlaceholder="Search props, placement types, or descriptions" onClose={() => setShowPropLibrary(false)} empty={<div className="miniature-library-empty"><PackageOpen size={28} /><strong>No saved props yet</strong><small>Create or import one in Prop Forge.</small><button className="primary-button" onClick={() => { setShowPropLibrary(false); onOpenPropForge(); }}><WandSparkles size={15} /> Open Prop Forge</button></div>} items={propLibrary.map((prop) => { const inCampaign = propAssets.some((entry) => entry.id === prop.id); const placed = useCampaignStore.getState().campaign.map.entities.filter((entry) => entry.assetId === prop.id).length; return { id: prop.id, name: prop.name, searchText: `${prop.description} ${prop.profile} ${prop.source}`, preview: <PropAssetPreview asset={prop} />, details: <>{prop.profile} · {prop.triangleCount.toLocaleString()} triangles · {placed} placed</>, inCampaign, actions: <><button onClick={() => { setShowPropLibrary(false); onOpenPropForge(prop.id); }}><Edit3 size={14} /> Open in Forge</button>{inCampaign ? <button className="remove-campaign-token" onClick={() => { removePropFromCampaign(prop.id); onNotify(`${prop.name} was removed from this campaign. The catalogue copy remains saved.`, "success"); }}><MinusCircle size={14} /> Remove from campaign</button> : <button className="primary-button" onClick={() => { addPropToCampaign(prop.id); onNotify(`${prop.name} is ready in this campaign's Props.`, "success"); }}><Check size={14} /> Add to campaign</button>}</>, status: inCampaign ? <span className="campaign-token-status"><Check size={12} /> In campaign</span> : undefined }; })} />}
+      {showMaterialLibrary && <AssetCatalogueDialog ariaLabel="Material catalogue" eyebrow={<><Layers3 size={13} /> Local material catalogue</>} title="Choose reusable PBR materials" description="Search material themes, preview their albedo, and add them to the current campaign for floors, walls, pillars, or props." searchPlaceholder="Search materials, surfaces, or mapping modes" onClose={() => setShowMaterialLibrary(false)} empty={<div className="miniature-library-empty"><Layers3 size={28} /><strong>No saved materials yet</strong><small>Create one in the Material mode of Prop Forge.</small><button className="primary-button" onClick={() => { setShowMaterialLibrary(false); onOpenPropForge(); }}><WandSparkles size={15} /> Open Prop Forge</button></div>} items={materialLibrary.map((material) => { const inCampaign = materialAssets.some((entry) => entry.id === material.id); return { id: material.id, name: material.name, searchText: `${material.description} ${material.target} ${material.materialClass} ${material.projection}`, preview: <MaterialAssetPreview asset={material} />, details: <>{material.target} · {material.projection} · seam {Math.round((material.seamScore ?? 0) * 100)}%</>, inCampaign, actions: inCampaign ? <button className="remove-campaign-token" onClick={() => removeMaterialFromCampaign(material.id)}><MinusCircle size={14} /> Remove from campaign</button> : <button className="primary-button" onClick={() => addMaterialToCampaign(material.id)}><Check size={14} /> Add to campaign</button>, status: inCampaign ? <span className="campaign-token-status"><Check size={12} /> In campaign</span> : undefined }; })} />}
     </aside>
   );
 }

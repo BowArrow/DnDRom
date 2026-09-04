@@ -112,6 +112,7 @@ export function SessionPanel({ onNotify }: SessionPanelProps) {
         <div className="section-heading"><BookOpen size={16} /><div><strong>{RULES_COVERAGE.ruleset} mechanics</strong><small>{RULES_COVERAGE.implemented.length} deterministic systems enabled</small></div></div>
         <p className="rules-coverage-copy">Core tests, attacks, cover, typed damage, HP, death saves, conditions, concentration, movement, carrying, rests, and resource recharge run in code. Class, spell, item, and monster automation is tracked separately and never assumed.</p>
         <a className="rules-source-link" href="https://www.dndbeyond.com/srd" target="_blank" rel="noreferrer"><BookOpen size={13} /> Official SRD 5.2.1 and license</a>
+        <label className="toggle-row"><span><strong>Player Dungeon Master</strong><small>Lets this table view and edit DM-only enemy and boss sheets during play</small></span><input type="checkbox" checked={campaign.settings.dungeonMasterMode === "player"} onChange={(event) => updateSettings({ dungeonMasterMode: event.target.checked ? "player" : "ai" })} /></label>
       </section>
 
       <section className="settings-section">

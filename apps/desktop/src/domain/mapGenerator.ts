@@ -25,9 +25,9 @@ const entity = (assetId: string, name: string, x: number, z: number, rotationY =
   position: { x, y, z }, rotation: { x: 0, y: rotationY, z: 0 }, scale: { x: scale, y: scale, z: scale },
 });
 
-const stretchedEntity = (assetId: string, name: string, x: number, z: number, scale: Vec3, rotationY = 0): MapEntity => ({
+const stretchedEntity = (assetId: string, name: string, x: number, z: number, scale: Vec3, rotationY = 0, y = 0): MapEntity => ({
   id: crypto.randomUUID(), assetId, name,
-  position: { x, y: 0, z }, rotation: { x: 0, y: rotationY, z: 0 }, scale,
+  position: { x, y, z }, rotation: { x: 0, y: rotationY, z: 0 }, scale,
 });
 
 const detectTheme = (prompt: string): MapTheme => {
@@ -54,18 +54,25 @@ const floorGrid = (assetId: string, width: number, depth: number): MapEntity[] =
 
 const broadGround = (assetId: string, width: number, depth: number): MapEntity => stretchedEntity(assetId, "Terrain", 0, 0, { x: width / 2, y: 1, z: depth / 2 });
 
+export const yawToward = (from: Pick<Vec3, "x" | "z">, target: Pick<Vec3, "x" | "z">): number => Math.atan2(target.x - from.x, target.z - from.z) * 180 / Math.PI;
+
+const chairAt = (table: Pick<Vec3, "x" | "z">, offsetX: number, offsetZ: number): MapEntity => {
+  const position = { x: table.x + offsetX, z: table.z + offsetZ };
+  return entity("chair", "Chair", position.x, position.z, yawToward(position, table));
+};
+
 const perimeter = (assetId: string, width: number, depth: number, doorSide: "north" | "south" | "east" | "west" = "south"): MapEntity[] => {
   const entities: MapEntity[] = [];
   for (let x = -width / 2 + 1; x < width / 2; x += 2) {
     const northDoor = doorSide === "north" && Math.abs(x) < 1;
     const southDoor = doorSide === "south" && Math.abs(x) < 1;
-    entities.push(entity(northDoor ? "door-wood" : assetId, northDoor ? "Door" : "Wall", x, depth / 2));
-    entities.push(entity(southDoor ? "door-wood" : assetId, southDoor ? "Door" : "Wall", x, -depth / 2));
+    entities.push(entity(northDoor ? "door-wood" : assetId, northDoor ? "Door" : "Wall", x, depth / 2, 0));
+    entities.push(entity(southDoor ? "door-wood" : assetId, southDoor ? "Door" : "Wall", x, -depth / 2, 180));
   }
   for (let z = -depth / 2 + 1; z < depth / 2; z += 2) {
     const westDoor = doorSide === "west" && Math.abs(z) < 1;
     const eastDoor = doorSide === "east" && Math.abs(z) < 1;
-    entities.push(entity(westDoor ? "door-wood" : assetId, westDoor ? "Door" : "Wall", -width / 2, z, 90));
+    entities.push(entity(westDoor ? "door-wood" : assetId, westDoor ? "Door" : "Wall", -width / 2, z, -90));
     entities.push(entity(eastDoor ? "door-wood" : assetId, eastDoor ? "Door" : "Wall", width / 2, z, 90));
   }
   return entities;
@@ -81,9 +88,9 @@ const attachPoiMarkers = (entities: MapEntity[], pois: PointOfInterest[] | undef
 
 function generateTavern(prompt: string, random: () => number, location?: WorldLocation): GameMap {
   const width = 18, depth = 14;
-  const entities = [...floorGrid("floor-wood", width, depth), ...perimeter("wall-wood", width, depth), entity("table-long", "Bar", -6.4, 3.8, 90), entity("barrel", "Ale barrel", -7.5, 5.1), entity("chest", "Strongbox", -7.2, -4.8), entity("torch", "Hearth light", -8.2, 0, 90, 1, 0.5), entity("token-hero", "Adventurer", 0, -4)];
+  const entities = [...floorGrid("floor-wood", width, depth), ...perimeter("wall-wood", width, depth), entity("table-long", "Bar", -6.4, 3.8, 90), entity("barrel", "Ale barrel", -7.5, 5.1), entity("chest", "Strongbox", -7.2, -4.8), entity("torch", "Hearth light", -8.2, 0, -90, 1, 0.5), entity("token-hero", "Adventurer", 0, -4)];
   for (const position of [{ x: -2.5, z: -1.8 }, { x: 2.7, z: -1.6 }, { x: -1, z: 3.4 }, { x: 4.6, z: 3.7 }]) {
-    entities.push(entity("table-round", "Tavern table", position.x, position.z, random() * 30), entity("chair", "Chair", position.x + 1.25, position.z, -90), entity("chair", "Chair", position.x - 1.25, position.z, 90));
+    entities.push(entity("table-round", "Tavern table", position.x, position.z, random() * 30), chairAt(position, 1.25, 0), chairAt(position, -1.25, 0));
   }
   return makeMap(location?.name ?? "The Lantern & Thorn", "tavern", width, depth, "#30271f", entities, prompt, location, attachPoiMarkers(entities, location?.pointOfInterests, width, depth, random));
 }
@@ -93,7 +100,7 @@ function generateSettlement(prompt: string, theme: "city" | "town" | "village", 
   const depth = theme === "city" ? 44 : theme === "town" ? 36 : 28;
   const entities: MapEntity[] = [broadGround("floor-grass", width, depth)];
   entities.push(stretchedEntity("road-dirt", "North Road", 0, 0, { x: 2.2, y: 1, z: depth / 4 }));
-  entities.push(stretchedEntity("road-dirt", "Market Road", 0, 0, { x: 2.2, y: 1, z: width / 8 }, 90));
+  entities.push(stretchedEntity("road-dirt", "Market Road", 0, 0, { x: 2.2, y: 1, z: width / 8 }, 90, .008));
   const buildingCount = theme === "city" ? 34 : theme === "town" ? 23 : 13;
   const blocks = [
     { minX: -width / 2 + 3, maxX: -4, minZ: -depth / 2 + 3, maxZ: -4 },
@@ -136,7 +143,7 @@ function generateLandscape(prompt: string, theme: "forest" | "plains" | "mountai
 
 function generateDungeon(prompt: string, random: () => number, theme: "dungeon" | "cavern" | "ruins", location?: WorldLocation): GameMap {
   const width = theme === "cavern" ? 22 : 20, depth = 18;
-  const entities = [...floorGrid("floor-stone", width, depth), ...perimeter("wall-stone", width, depth, "south"), entity("token-hero", "Adventurer", 0, -6), entity("chest", "Ancient chest", 6.4, 5.4, -25), entity("torch", "Torch", -8.7, -3.5, 90, 1, 0.6), entity("torch", "Torch", 8.7, 3.5, -90, 1, 0.6)];
+  const entities = [...floorGrid("floor-stone", width, depth), ...perimeter("wall-stone", width, depth, "south"), entity("token-hero", "Adventurer", 0, -6), entity("chest", "Ancient chest", 6.4, 5.4, -25), entity("torch", "Torch", -8.7, -3.5, -90, 1, 0.6), entity("torch", "Torch", 8.7, 3.5, 90, 1, 0.6)];
   for (let x = -7; x <= 7; x += 2) entities.push(entity(Math.abs(x - 1) < 1 ? "door-wood" : "wall-stone", Math.abs(x - 1) < 1 ? "Inner door" : "Inner wall", x, -1));
   if (theme === "cavern") for (let index = 0; index < 18; index += 1) entities.push(entity("rock", "Cavern rock", (random() - 0.5) * 17, (random() - 0.5) * 14, random() * 360, 0.55 + random()));
   entities.push(theme === "ruins" ? entity("token-monster", "Ruins guardian", 0, 6.5, 180) : entity("token-orc", "Dungeon guard", 2.5, 4.8, 180));

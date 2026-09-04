@@ -58,6 +58,8 @@ export function createDefaultCharacter(): Character {
     damageResistances: [],
     damageVulnerabilities: [],
     damageImmunities: [],
+    role: "player",
+    sheetVisibility: "players",
     tokenAssetId: "token-hero",
     notes: "Aria is searching for the cartographer who disappeared near the Ashen Vault.",
   };
@@ -66,13 +68,31 @@ export function createDefaultCharacter(): Character {
 export function createStarterCampaign(): Campaign {
   const now = new Date().toISOString();
   const character = createDefaultCharacter();
+  const map = generateMapFromPrompt("A compact ancient dungeon with an inner treasure room and an orc guard");
+  const sceneId = crypto.randomUUID();
   return {
     schemaVersion: 1,
     id: crypto.randomUUID(),
     name: "The Ember Below",
     synopsis: "A missing cartographer, a sealed vault, and a fire that remembers every name spoken near it.",
-    map: generateMapFromPrompt("A compact ancient dungeon with an inner treasure room and an orc guard"),
+    map,
     characters: [character],
+    tokenAssets: [],
+    basePlateAssets: [],
+    basePlateAssignments: {},
+    tokenCharacterLinks: {},
+    propAssets: [],
+    materialAssets: [],
+    scenes: [{
+      id: sceneId,
+      name: map.name,
+      map,
+      partyCharacterIds: [character.id],
+      notes: "Starting scene",
+      createdAt: now,
+      updatedAt: now,
+    }],
+    activeSceneId: sceneId,
     activeCharacterId: character.id,
     messages: [
       {
@@ -113,7 +133,9 @@ export function createStarterCampaign(): Campaign {
       whisperEndpoint: "",
       speakDmResponses: true,
       useLocalAiForMaps: false,
-      comfyUiEndpoint: "http://127.0.0.1:8188",
+      comfyUiEndpoint: "http://127.0.0.1:8189",
+      dungeonMasterMode: "ai",
+      propImageProvider: "sana-local",
     },
     createdAt: now,
     updatedAt: now,

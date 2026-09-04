@@ -1,0 +1,25 @@
+{
+  "license": "CC0-1.0",
+  "source": "https://polyhaven.com/",
+  "packing": "ARM textures use red=ambient occlusion, green=roughness, blue=metalness",
+  "assets": [
+    { "id": "plank_flooring_04", "surface": "wood-floor", "source": "https://polyhaven.com/a/plank_flooring_04", "resolution": "1k" },
+    { "id": "wood_table_001", "surface": "wood-table", "source": "https://polyhaven.com/a/wood_table_001", "resolution": "1k" },
+    { "id": "coated_pine", "surface": "wood-chair", "source": "https://polyhaven.com/a/coated_pine", "resolution": "1k" },
+    { "id": "weathered_planks", "surface": "wood-barrel", "source": "https://polyhaven.com/a/weathered_planks", "resolution": "1k" },
+    { "id": "wooden_planks", "surface": "wood-crate", "source": "https://polyhaven.com/a/wooden_planks", "resolution": "1k" },
+    { "id": "wooden_panels", "surface": "wood-chest", "source": "https://polyhaven.com/a/wooden_panels", "resolution": "1k" },
+    { "id": "dark_wood", "surface": "wood-structural", "source": "https://polyhaven.com/a/dark_wood", "resolution": "1k" },
+    { "id": "monastery_stone_floor", "surface": "stone-floor", "source": "https://polyhaven.com/a/monastery_stone_floor", "resolution": "1k" },
+    { "id": "medieval_blocks_03", "surface": "stone-wall", "source": "https://polyhaven.com/a/medieval_blocks_03", "resolution": "1k" },
+    { "id": "rock_boulder_dry", "surface": "stone-natural", "source": "https://polyhaven.com/a/rock_boulder_dry", "resolution": "1k" },
+    { "id": "metal_plate", "surface": "metal", "source": "https://polyhaven.com/a/metal_plate", "resolution": "1k" },
+    { "id": "cotton_jersey", "surface": "fabric", "source": "https://polyhaven.com/a/cotton_jersey", "resolution": "1k" },
+    { "id": "brown_leather", "surface": "leather", "source": "https://polyhaven.com/a/brown_leather", "resolution": "1k" },
+    { "id": "bark_brown_01", "surface": "bark", "source": "https://polyhaven.com/a/bark_brown_01", "resolution": "1k" },
+    { "id": "sparse_grass", "surface": "grass", "source": "https://polyhaven.com/a/sparse_grass", "resolution": "1k" },
+    { "id": "brown_mud", "surface": "earth", "source": "https://polyhaven.com/a/brown_mud", "resolution": "1k" },
+    { "id": "plastered_wall", "surface": "plaster", "source": "https://polyhaven.com/a/plastered_wall", "resolution": "1k" },
+    { "id": "roof_tiles", "surface": "roof", "source": "https://polyhaven.com/a/roof_tiles", "resolution": "1k" }
+  ]
+}

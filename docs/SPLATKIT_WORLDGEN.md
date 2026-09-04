@@ -12,34 +12,39 @@ DnDRom integrates the open-source workflow demonstrated in Mickmumpitz's **We Op
 ## What the integration does
 
 1. DnDRom creates the story, structured world, settlements, POIs, and authoritative low-cost mesh map.
-2. The creator opens **AI scenery studio** and either supplies a 2:1 panorama or chooses **Prompt locally** with the official workflow `0_generate_360_panorama-upscale.json` exported in ComfyUI API format.
-3. Prompt mode offers a searchable offline scene-idea catalog. It queues workflow 0 against loopback ComfyUI, captures the generated panorama, then feeds it into workflow `1_generate-dataset-hires.json`. Upload mode starts directly from the creator's panorama.
-4. DnDRom patches only positive prompts, uploads images only to loopback ComfyUI, queues the workflows, and monitors completion.
+2. The creator opens **AI scenery studio** and chooses **Prompt**, **Online library**, or **Upload**. The official `0_generate_360_panorama-upscale.json` and `1_generate-dataset-hires.json` presets are included and converted to API prompts against the running ComfyUI node definitions. No workflow download or Developer Mode export is required.
+3. Prompt mode offers a searchable offline story-seed catalog. Online-library mode browses Poly Haven's live public HDRI catalog and downloads only the explicitly selected tone-mapped CC0 panorama. Upload mode starts from the creator's own image. A selected API workflow is cached locally for later runs.
+4. DnDRom provisions and starts its private local engine automatically, patches only positive prompts, uploads images only to that loopback process, queues the workflows, and monitors completion.
 5. SplatKit runs panorama -> MoGe geometry -> controlled WAN fly-through -> SphereSfM -> COLMAP dataset.
-6. The creator trains that dataset in Brush, LichtFeld, or another COLMAP-compatible 3DGS trainer.
-7. DnDRom imports the resulting Gaussian `.ply`, compressed `.ply`, or bundled `.sog`, stores it in local IndexedDB by SHA-256, and renders it with PlayCanvas.
+6. DnDRom's local result node measures total and per-rail camera registration, reconstruction connectivity, ground support, and scale before the dataset can advance.
+7. DnDRom launches its installed Brush tool for 3,000â€“6,000 steps, periodically exports a recoverable PLY, and stops after a measured 250-step validation-loss plateau when a safe export already exists.
+8. The validated result is cleaned, compressed, partitioned into Morton-ordered spatial tiles, stored in local IndexedDB by SHA-256, and streamed with PlayCanvas.
 
-If a workflow directly returns a PLY or SOG output, DnDRom downloads and imports it automatically. The standard SplatKit dataset workflow stops at COLMAP, so training is normally a separate creator step.
+If a workflow directly returns a PLY or SOG output, DnDRom downloads and imports it immediately. When the standard SplatKit workflow returns a COLMAP dataset, DnDRom runs Brush and imports its exported PLY without another user step.
 
 ## Setup
 
-Install ComfyUI and ComfyUI-SplatKit using the upstream instructions. Supply the WAN 2.1 image-to-video checkpoint and the Matrix-3D panorama LoRA required by the selected official workflow. Start ComfyUI with API access from the desktop webview; for a typical local setup this may require the ComfyUI CORS option:
+There is no separate setup. Choose **Prompt**, **Online library**, or **Upload**, then press the generation button. On first use DnDRom checks disk space, downloads the pinned GPU-specific ComfyUI portable runtime, model files, custom-node archives, Python requirements, and Brush release, verifies the fixed-size artifacts and SHA-256 hashes, installs everything under the app-local data directory, starts its private loopback engine on port `8189`, and continues through the full workflow. Downloads are resumable and completed dependencies are reused.
 
-```powershell
-python main.py --listen 127.0.0.1 --port 8188 --enable-cors-header
-```
+DnDRom ships the upstream UI workflows and performs UI-graph-to-API conversion locally. Custom workflow overrides remain available for advanced users but are not required.
 
-Keep the server bound to loopback unless you intentionally secure it for a trusted network. In ComfyUI, enable developer options and export the upstream workflow in **API format**. The ordinary UI workflow JSON is not executable through `/prompt`.
+DnDRom enforces the generation boundary: Scenery Studio rejects any ComfyUI hostname other than `localhost`, `127.0.0.1`, or `::1`, and it contains no company generation endpoint. Opening the explicitly online **Poly Haven** tab requests the public catalog and thumbnails; selecting an HDRI downloads its public tone-mapped panorama. DnDRom does not send the campaign, scene prompt, or generated data to Poly Haven.
 
-DnDRom enforces that boundary: Scenery Studio rejects any ComfyUI hostname other than `localhost`, `127.0.0.1`, or `::1`. It contains no company generation endpoint and performs no automatic catalog search. The optional Poly Haven link simply opens the source in the user's browser; no prompt or campaign data is sent with it.
-
-Poly Haven was linked by the reference video and its assets are CC0. Its hosted public API currently has separate non-commercial access terms, so DnDRom does not call or mirror that API. A native online browser should only be enabled after obtaining appropriate commercial API permission. The built-in idea catalog is code-local and generates through the user's own ComfyUI instead.
+Poly Haven's assets are CC0. Its public API terms now allow commercial integrations without a key and require the live source to be clearly attributed, so the browser and selected-asset state both display **Poly Haven** attribution. Treat this hosted catalog as optional: loss of internet access never blocks prompt generation, uploads, existing maps, or play.
 
 ## Resource tiers
 
-This is optional creator-time processing, not a play-time dependency. Matrix-3D's upstream 5B low-VRAM route documents approximately 12 GB VRAM, while larger paths require more; the video workflow's WAN 2.1 14B path should be treated as a quality-tier job. DnDRom therefore never downloads these models with the base installer and never blocks a campaign on their availability.
+This is optional creator-time processing, not a play-time dependency. The default panorama and novel-view pack is large and should be treated as a quality-tier job. DnDRom keeps it out of the base installer and shows the one-time download size before generation; building and playing procedural mesh maps never depends on it.
 
-Imported splats are capped at 512 MB per file. The renderer applies a two-million-visible-splat budget. For distribution, convert cleaned PLY assets to SOG with SplatTransform; SOG is PlayCanvas' recommended web-delivery format.
+All three reconstruction profiles preserve four continuous 81-frame camera rails and four WAN sampling steps. They reduce high-resolution panorama reprojection frequency and model residency, never the camera coverage used by SphereSfM:
+
+| Profile | WAN conditioning | High-resolution anchors | Composite | Runtime visible splats |
+| --- | ---: | ---: | ---: | ---: |
+| Low memory | 640×320 | every fourth frame | 2048 px | 150,000 |
+| Game (default) | 960×480 | every fourth frame | 4096 px | 450,000 |
+| Reference | 1440×720 | every second frame | 8192 px | 850,000 |
+
+SphereSfM receives all continuous rails. Retry reuses the panorama, completed COLMAP dataset, or trained world independently and refuses to import a one-rail result as a successful world. Generated scenery is grounded at reconstruction scale rather than stretched across the tabletop; low-registration, disconnected, implausibly scaled, sparse, or oversized-cloud output is rejected. Valid backgrounds are split into independently loadable tiles and only tiles in the conservative visible set consume normal render work. Imported splats are capped at 512 MB per file. For distribution, SOG tile packaging remains a later portability optimization.
 
 ## Gameplay and portability boundaries
 
@@ -50,4 +55,4 @@ Imported splats are capped at 512 MB per file. The renderer applies a two-millio
 
 ## Licensing
 
-ComfyUI-SplatKit is MIT licensed and preserves notices for its vendored MIT components. The optional SphereSfM binary and every downloaded model/checkpoint have their own terms. DnDRom records the pipeline provenance but does not redistribute the workflow, model weights, SphereSfM binary, or trainers in its installer. Generated-asset commercial rights must be evaluated from the exact models and inputs selected by the creator.
+ComfyUI-SplatKit is MIT licensed and preserves notices for its vendored MIT components. Every downloaded model, node, binary, and input asset retains its upstream terms. DnDRom records the pipeline provenance and downloads large components from their upstream distribution locations rather than embedding them in the installer. Generated-asset commercial rights must be evaluated from the exact models and inputs selected by the creator.

@@ -1,4 +1,5 @@
 import type { Campaign, Character } from "../domain/types";
+import { normalizeCampaignScenes, snapshotActiveScene } from "../domain/campaignScenes";
 
 const download = (name: string, contents: string, type: string) => {
   const url = URL.createObjectURL(new Blob([contents], { type }));
@@ -12,7 +13,7 @@ const download = (name: string, contents: string, type: string) => {
 const safeFileName = (value: string): string => value.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "").slice(0, 80) || "campaign";
 
 export function exportCampaign(campaign: Campaign): void {
-  download(`${safeFileName(campaign.name)}.dndrom`, JSON.stringify(campaign, null, 2), "application/json");
+  download(`${safeFileName(campaign.name)}.dndrom`, JSON.stringify(snapshotActiveScene(campaign), null, 2), "application/json");
 }
 
 export function exportCharacter(character: Character): void {
@@ -25,13 +26,12 @@ export async function importCampaign(file: File): Promise<Campaign> {
   if (campaign?.schemaVersion !== 1 || typeof campaign.name !== "string" || !campaign.map || !Array.isArray(campaign.characters)) {
     throw new Error("This file is not a supported DnDRom campaign");
   }
-  return { ...campaign, id: campaign.id || crypto.randomUUID(), updatedAt: new Date().toISOString() };
+  return normalizeCampaignScenes({ ...campaign, tokenAssets: campaign.tokenAssets ?? [], propAssets: campaign.propAssets ?? [], materialAssets: campaign.materialAssets ?? [], basePlateAssets: campaign.basePlateAssets ?? [], basePlateAssignments: campaign.basePlateAssignments ?? {}, tokenCharacterLinks: campaign.tokenCharacterLinks ?? {}, id: campaign.id || crypto.randomUUID(), updatedAt: new Date().toISOString() });
 }
 
 export async function saveCampaignNative(campaign: Campaign): Promise<string | null> {
   if (!("__TAURI_INTERNALS__" in window)) return null;
   const { invoke } = await import("@tauri-apps/api/core");
-  const saved = await invoke<{ name: string; path: string }>("save_campaign", { name: safeFileName(campaign.name), contents: JSON.stringify(campaign) });
+  const saved = await invoke<{ name: string; path: string }>("save_campaign", { name: safeFileName(campaign.name), contents: JSON.stringify(snapshotActiveScene(campaign)) });
   return saved.path;
 }
-

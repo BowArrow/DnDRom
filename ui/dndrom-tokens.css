@@ -1,0 +1,76 @@
+/* ============================================================
+   DnDRom — design tokens (v2, "lamplight")
+   Drop into apps/desktop/src/styles/tokens.css and import once.
+
+   Two materials, and the rule is absolute:
+     leather  = surfaces the app owns (chrome, panels, tools)
+     vellum   = surfaces the player writes on (character sheet, notes)
+   Brass is the only metal. Violet appears only where a local
+   model is running, so it doubles as your privacy signal.
+   ============================================================ */
+
+:root{
+  /* --- Materials: tooled leather and lamplight, not slate --- */
+  --pitch:#100c08; --leather-900:#181109; --leather-800:#20180e; --leather-700:#2a2013;
+  --leather-600:#37291721; --leather-ctl:#372917; --leather-hi:#463420;
+  --rule:#513c22; --rule-soft:#33261619; --rule-in:#332616;
+
+  /* --- Parchment, used as a real surface for anything you'd write on --- */
+  --vellum:#e5d9bb; --vellum-2:#d8c9a4; --vellum-line:#b9a67c; --vellum-ink:#2a1f12; --vellum-dim:#6b5a3f;
+
+  /* --- Text on dark --- */
+  --text:#efe3c6; --text-dim:#b3a181; --text-faint:#7d6b4f;
+
+  /* --- Metals and pigment --- */
+  --brass:#c9a227; --brass-hi:#f3dda0; --brass-lo:#7d5f21; --brass-wash:rgba(201,162,39,.13);
+  --gild:linear-gradient(180deg,#e8ce7a 0%,#c9a227 46%,#9a7519 54%,#d9bb63 100%);
+  --verd:#5f9c72; --verd-wash:rgba(95,156,114,.15);
+  --wax:#9e2f28; --wax-hi:#d4715f; --wax-wash:rgba(158,47,40,.18);
+  --amber:#c8862a; --amber-wash:rgba(200,134,42,.16);
+  --arcane:#8b6fd0; --arcane-soft:#b6a2ec; --arcane-wash:rgba(139,111,208,.16);
+
+  --font-display:"Cinzel","Trajan Pro",Georgia,serif;
+  --font-body:"EB Garamond","Iowan Old Style",Georgia,serif;
+  --font-ui:"EB Garamond",Georgia,serif;
+  --font-mono:"IBM Plex Mono",Consolas,monospace;
+
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:20px;--s6:24px;--s8:32px;--s10:40px;
+  --r-control:2px; --r-card:3px;
+  --shadow-panel:0 14px 38px rgba(0,0,0,.6); --shadow-pop:0 22px 60px rgba(0,0,0,.75);
+}
+
+
+/* The frame: a leather plate with four engraved brass corners.
+   Reuse this on every panel — it is the thing that makes the app
+   look like DnDRom and not a dark-mode dashboard. */
+.plate{
+  position:relative;
+  background:linear-gradient(180deg,rgba(201,162,39,.05),transparent 70px), var(--leather-800);
+  border:1px solid var(--rule);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.5), inset 0 1px 0 rgba(201,162,39,.1);
+}
+.plate::before{
+  content:""; position:absolute; inset:3px; pointer-events:none; z-index:1;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M1 15V6q0-5 5-5h9' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='5.5' cy='5.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M15 15V6q0-5-5-5H1' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='10.5' cy='5.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M1 1v9q0 5 5 5h9' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='5.5' cy='10.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='M15 1v9q0 5-5 5H1' fill='none' stroke='%23c9a227' stroke-width='1.1' opacity='.75'/%3E%3Ccircle cx='10.5' cy='10.5' r='1.4' fill='%23c9a227' opacity='.9'/%3E%3C/svg%3E");
+  background-position:left top,right top,left bottom,right bottom;
+  background-repeat:no-repeat;
+}
+
+/* Page grain — apply once on the app root. */
+.app-grain{
+  background:
+    radial-gradient(120% 80% at 50% -10%, #241a10 0%, transparent 60%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E"),
+    var(--pitch);
+}
+
+:where(button,a,input,select,textarea,[tabindex]):focus-visible{
+  outline:2px solid var(--brass); outline-offset:2px;
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important; transition-duration:.01ms !important}
+}

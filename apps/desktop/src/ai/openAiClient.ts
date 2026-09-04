@@ -24,19 +24,25 @@ export const assertLocalAiEndpoint = (endpoint: string): string => {
 const normalizeEndpoint = (endpoint: string): string => assertLocalAiEndpoint(endpoint);
 
 export async function completeLocalChat(options: ChatOptions): Promise<string> {
-  const response = await fetch(`${normalizeEndpoint(options.endpoint)}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const url = `${normalizeEndpoint(options.endpoint)}/chat/completions`;
+  const body = {
       model: options.model,
       messages: options.messages,
       temperature: options.temperature ?? 0.7,
       max_tokens: options.maxTokens ?? 500,
       stream: false,
-      response_format: { type: "json_object" },
-    }),
+  };
+  const request = (jsonMode: boolean) => fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(jsonMode ? { ...body, response_format: { type: "json_object" } } : body),
     signal: options.signal,
   });
+  let response = await request(true);
+  // Several otherwise OpenAI-compatible local engines reject response_format.
+  // The system prompt already requires JSON, so retry once without that optional
+  // field instead of breaking contextual baseplate suggestions with HTTP 400.
+  if (response.status === 400 && !options.signal?.aborted) response = await request(false);
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(`Local AI returned ${response.status}${detail ? `: ${detail.slice(0, 180)}` : ""}`);

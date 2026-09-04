@@ -10,6 +10,12 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@dimforge/rapier3d-compat':
+        specifier: ^0.20.0
+        version: 0.20.0
+      '@playcanvas/splat-transform':
+        specifier: 3.3.3
+        version: 3.3.3(playcanvas@2.21.4)
       '@tauri-apps/api':
         specifier: ^2.11.0
         version: 2.11.1
@@ -79,6 +85,9 @@ importers:
         version: 8.21.3
 
 packages:
+
+  '@adobe/spz@0.2.2':
+    resolution: {integrity: sha512-KUCw5R52rCBnfyvOOIa9nUQGfR6TEcHjYzuWDYRGb1fpkpnkci6VXFqCx/xFJ1yEN7V5gc9YxU2zIY6sEjIbhw==}
 
   '@asamuzakjp/css-color@3.2.0':
     resolution: {integrity: sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==}
@@ -197,6 +206,9 @@ packages:
   '@csstools/css-tokenizer@3.0.4':
     resolution: {integrity: sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==}
     engines: {node: '>=18'}
+
+  '@dimforge/rapier3d-compat@0.20.0':
+    resolution: {integrity: sha512-X4W9pJBdGRX5CO3c/gUNjBFEFG2fn4nYxp9k8STdBDaLa0/w5XTW2ArpayS+9jGFojTi3uFSOWAElCd4rkpekA==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -442,6 +454,13 @@ packages:
 
   '@oxc-project/types@0.147.0':
     resolution: {integrity: sha512-IJ3s6ltHLp45S0bh7phkX+gJO7A1Wuz2EaqpAhb8WjqDwbzMiWKHhyyT42tskaWjEYXtHtVCPpnBJVT9+dcRLg==}
+
+  '@playcanvas/splat-transform@3.3.3':
+    resolution: {integrity: sha512-622QIQ+zZjAWDmhO6fRiPOxlJKAI5fPWgQKBAZ9a64g4Y02Q69VbkSRp4LcvdIhcRpQtK1AyR8HaFqa/Qx6Fog==}
+    engines: {node: '>=22.0.0'}
+    hasBin: true
+    peerDependencies:
+      playcanvas: ^2.0.0
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     resolution: {integrity: sha512-b+jTcARdTiFLI6jB4a5XjTm0RWd6KcRfQj/I2356fxUZemiho9zQLxo0RtCuMDAyKcLo6cEltkgbQp6d1+sjjQ==}
@@ -1198,6 +1217,9 @@ packages:
     resolution: {integrity: sha512-o8qghlI8NZHU1lLPrpi2+Uq7abh4GGPpYANlalzWxyWteJOCsr/P+oPBA49TOLu5FTZO4d3F9MnWJfiMo4BkmA==}
     engines: {node: '>=18'}
 
+  webgpu@0.4.0:
+    resolution: {integrity: sha512-F5pimn3Aoi0zWjuRdiVs5TnrUwSzD2lESBohsIUsqyitWkGRQlXU2fhV6ycXlQTa1bvAf3sjqiUpBEpmSQ5ptA==}
+
   webidl-conversions@7.0.0:
     resolution: {integrity: sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==}
     engines: {node: '>=12'}
@@ -1264,6 +1286,8 @@ packages:
         optional: true
 
 snapshots:
+
+  '@adobe/spz@0.2.2': {}
 
   '@asamuzakjp/css-color@3.2.0':
     dependencies:
@@ -1406,6 +1430,8 @@ snapshots:
       '@csstools/css-tokenizer': 3.0.4
 
   '@csstools/css-tokenizer@3.0.4': {}
+
+  '@dimforge/rapier3d-compat@0.20.0': {}
 
   '@esbuild/aix-ppc64@0.28.2':
     optional: true
@@ -1553,6 +1579,14 @@ snapshots:
     optional: true
 
   '@oxc-project/types@0.147.0': {}
+
+  '@playcanvas/splat-transform@3.3.3(playcanvas@2.21.4)':
+    dependencies:
+      '@adobe/spz': 0.2.2
+      playcanvas: 2.21.4
+      webgpu: 0.4.0
+    transitivePeerDependencies:
+      - supports-color
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     optional: true
@@ -2179,6 +2213,13 @@ snapshots:
   w3c-xmlserializer@5.0.0:
     dependencies:
       xml-name-validator: 5.0.0
+
+  webgpu@0.4.0:
+    dependencies:
+      '@webgpu/types': 0.1.72
+      debug: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
 
   webidl-conversions@7.0.0: {}
 
