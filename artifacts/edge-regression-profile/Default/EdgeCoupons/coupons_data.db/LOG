@@ -1,5 +1,0 @@
-2026/09/02-13:17:02.614 7c48 Creating DB C:\Users\cshor\Documents\WebProjects\DnDRom\artifacts\edge-regression-profile\Default\EdgeCoupons/coupons_data.db since it was missing.
-2026/09/02-13:17:02.636 7c48 Reusing MANIFEST C:\Users\cshor\Documents\WebProjects\DnDRom\artifacts\edge-regression-profile\Default\EdgeCoupons/coupons_data.db/MANIFEST-000001
-2026/09/02-13:17:04.118 a138 Level-0 table #5: started
-2026/09/02-13:17:04.133 a138 Level-0 table #5: 683273 bytes OK
-2026/09/02-13:17:04.138 a138 Delete type=0 #3
