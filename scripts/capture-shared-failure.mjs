@@ -1,0 +1,1 @@
+import {connectNative} from './native-cdp.mjs';import {writeFile} from 'node:fs/promises';const c=await connectNative();const t=await c.evaluate('window.dndromRejectedWorldTile');if(t){await writeFile('artifacts/shared-world/rejected-tile.dndscene',t.json);console.log(t.id,t.error,t.json.length);}c.close();

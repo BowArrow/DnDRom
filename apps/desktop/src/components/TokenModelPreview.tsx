@@ -161,6 +161,7 @@ export function TokenModelPreview({ model, kind, shape, baseColor, accentColor, 
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<PreviewRuntime | null>(null);
   const [modelIssue, setModelIssue] = useState("");
+  const [baseIssue, setBaseIssue] = useState("");
 
   useLayoutEffect(() => {
     const canvasHost = canvasHostRef.current;
@@ -235,6 +236,8 @@ export function TokenModelPreview({ model, kind, shape, baseColor, accentColor, 
       runtime.asset = null;
       runtime.pendingAsset = null;
       runtime.baseHandle?.destroy();
+    setBaseIssue("");
+    runtime.miniatureHost.setLocalPosition(0,0,0);
       for (const item of runtime.materials) item.destroy();
       runtime.groundMaterial?.destroy();
       destroyLightingRig(runtime.lighting);
@@ -259,7 +262,10 @@ export function TokenModelPreview({ model, kind, shape, baseColor, accentColor, 
     const runtime = runtimeRef.current;
     if (!runtime || runtime.disposed) return;
     runtime.baseHandle?.destroy();
-    runtime.baseHandle = renderBasePlate({ app: runtime.app, parent: runtime.baseHost, token: { name: "Forge miniature", footprint, base: { shape, color: baseColor, accentColor, height: kind === "boss" ? .18 : .14 } }, asset: basePlate, quality: lighting?.quality ?? "balanced", reducedMotion: runtime.reducedMotion, propAssets, materialAssets });
+    setBaseIssue("");
+    runtime.miniatureHost.setLocalPosition(0,0,0);
+    if(canvasRef.current) canvasRef.current.dataset.baseSurface="fallback";
+    runtime.baseHandle = renderBasePlate({ app: runtime.app, parent: runtime.baseHost, token: { name: "Forge miniature", footprint, base: { shape, color: baseColor, accentColor, height: kind === "boss" ? .18 : .14 } }, asset: basePlate, quality: lighting?.quality ?? "balanced", reducedMotion: runtime.reducedMotion, propAssets, materialAssets, onFitWarning:setBaseIssue, onAnchorTopChanged: (height, offset) => { runtime.miniatureHost.setLocalPosition(offset.x,0,offset.z); runtime.baseTop = height; if (runtime.miniature) groundModelOnBase(runtime.miniature, runtime.miniatureHost, height, .62); if(canvasRef.current){canvasRef.current.dataset.baseSurface="scenic";canvasRef.current.dataset.baseAnchorTop=String(height);canvasRef.current.dataset.baseAnchorOffset=JSON.stringify(offset);} } });
     runtime.baseTop = runtime.baseHandle.anchorTop;
     if (runtime.miniature) groundModelOnBase(runtime.miniature, runtime.miniatureHost, runtime.baseTop, .62);
     if (canvasRef.current) canvasRef.current.dataset.baseRevision = basePlate?.updatedAt ?? `${shape}:${baseColor}:${accentColor}`;
@@ -393,7 +399,7 @@ export function TokenModelPreview({ model, kind, shape, baseColor, accentColor, 
   return (
     <figure className="token-model-preview">
       <div ref={canvasHostRef} className="shared-playcanvas-host" />
-      {modelIssue && <span className="token-preview-warning" role="status">Model preview failed: {modelIssue}</span>}
+      {(modelIssue||baseIssue) && <span className="token-preview-warning" role="status">{modelIssue ? `Model preview failed: ${modelIssue}` : baseIssue}</span>}
       <figcaption>{model ? "Generated 3D miniature + gameplay base" : "Live 3D base preview · model appears here"}</figcaption>
     </figure>
   );

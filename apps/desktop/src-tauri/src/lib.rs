@@ -185,7 +185,7 @@ pub fn run() {
         .expect("error while building DnDRom");
     app.run(|app_handle, event| {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-            app_handle.state::<local_runtime::LocalRuntimeState>().shutdown(app_handle);
+            if let Ok(context) = local_runtime::context(app_handle) { app_handle.state::<local_runtime::LocalRuntimeState>().shutdown(&context); }
         }
     });
 }

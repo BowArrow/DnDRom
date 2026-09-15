@@ -1,0 +1,30 @@
+// Uses an already-running app-owned language endpoint; never downloads a model.
+import { createRequire } from "node:module";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+const root = path.resolve(import.meta.dirname, ".."), require = createRequire(path.join(root, "apps/desktop/package.json"));
+const endpoint = process.argv[2];
+if (!endpoint) throw new Error("Pass the app-owned runtime's loopback /v1 endpoint");
+const output = path.join(root, "artifacts/blueprint-planner-live.mjs");
+await mkdir(path.dirname(output), { recursive: true });
+await require("esbuild").build({ stdin: { contents: 'export { generateWorldBlueprints } from "./apps/desktop/src/ai/mapDirector"; export { createStarterCampaign } from "./apps/desktop/src/domain/seed";', resolveDir: root }, outfile: output, bundle: true, platform: "node", format: "esm" });
+const { generateWorldBlueprints, createStarterCampaign } = await import(pathToFileURL(output));
+const originalFetch = globalThis.fetch;
+let requestIndex = 0;
+const statuses = [];
+globalThis.fetch = async (...args) => {
+  await writeFile(path.join(root, "artifacts/blueprint-request.json"), args[1].body);
+  if (process.argv.includes("--capture-schema")) process.exit(0);
+  const response = await originalFetch(...args);
+  await writeFile(path.join(root, `artifacts/blueprint-response-${++requestIndex}.json`), await response.clone().text());
+  statuses.push(response.status);
+  console.log(JSON.stringify({ request: requestIndex, status: response.status }));
+  return response;
+};
+const started = Date.now();
+const result = await generateWorldBlueprints({ description: "An ancient Chinese mountain village with curved tile roofs, a stone bridge over a clear river and a dense pine forest", kind: "settlement", biome: "mountains", size: "medium", gridShape: "square", seed: 7241, background: "none" }, { ...createStarterCampaign().settings, localAiRuntime: "external", useLocalAiForMaps: true, localAiEndpoint: endpoint, localAiModel: "dndrom-director" });
+await writeFile(path.join(root, "artifacts/blueprint-planner-live.json"), JSON.stringify({ elapsedSeconds: (Date.now() - started) / 1000, statuses, ...result }, null, 2));
+if (statuses.some(status => status !== 200)) throw new Error("The runtime rejected constrained generation; unconstrained retries do not pass this check");
+if (result.provider !== "local-ai") throw new Error(result.warning);
+console.log(JSON.stringify({ elapsedSeconds: (Date.now() - started) / 1000, provider: result.provider, concepts: result.blueprints.map(({ name, zones }) => ({ name, zones: zones.length })) }, null, 2));

@@ -3,7 +3,7 @@ import { createStarterCampaign } from "../domain/seed";
 import type { MapEntity, TokenAsset } from "../domain/types";
 import { useCampaignStore } from "./campaignStore";
 import { createBasePlateAsset, createBasePlateRecipe } from "../domain/baseplates";
-import { createSceneTemplate } from "../domain/worldForge";
+import { compileWorldBlueprint, createFallbackWorldBlueprints, createSceneTemplate } from "../domain/worldForge";
 
 const placed = (name: string): MapEntity => ({ id: crypto.randomUUID(), assetId: "crate", name, position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } });
 const token: TokenAsset = { id: "token-custom-test", name: "Goblin", kind: "enemy", storageKey: "sha256:test", filename: "goblin.glb", byteLength: 128, footprint: .55, modelScale: 1, modelLift: .62, defaultPlacementScale: 1, base: { shape: "round", color: "#111111", accentColor: "#aa2222", height: .14 }, source: "import", createdAt: "now", gameplayAuthority: "mesh-token" };
@@ -94,11 +94,17 @@ describe("campaign and scene persistence", () => {
     const originalSceneId = useCampaignStore.getState().campaign.activeSceneId!;
     const originalMap = useCampaignStore.getState().campaign.map;
     useCampaignStore.getState().addEntity(placed("Keep original scene"));
-    const generated = { ...structuredClone(originalMap), id: "generated-map", name: "Generated swamp", entities: [placed("Generated landmark")] };
+    const blueprint = createFallbackWorldBlueprints({ description: "A warm tavern interior", kind: "interior", biome: "forest", size: "small", gridShape: "square", mood: "warm", seed: 8021, background: "none" })[0];
+    const generated = compileWorldBlueprint(blueprint).map;
+    generated.id = "generated-map";
+    generated.name = "Generated tavern";
     const template = createSceneTemplate(generated, "A generated swamp");
     useCampaignStore.getState().saveSceneTemplate(template);
     const created = useCampaignStore.getState().addScene(generated.name, generated, [], "Published from Scene Forge");
     expect(useCampaignStore.getState().campaign.activeSceneId).toBe(created.id);
+    expect(useCampaignStore.getState().campaign.map.generation?.blueprint.kind).toBe("interior");
+    expect(useCampaignStore.getState().campaign.map.world?.chunks.length).toBeGreaterThan(1);
+    expect(useCampaignStore.getState().campaign.scenes?.find((scene) => scene.id === created.id)?.map.generation?.blueprint.id).toBe(blueprint.id);
     expect(useCampaignStore.getState().switchScene(originalSceneId)).toBe(true);
     expect(useCampaignStore.getState().campaign.map.entities.some((entry) => entry.name === "Keep original scene")).toBe(true);
     expect(useCampaignStore.getState().sceneLibrary).toContainEqual(expect.objectContaining({ id: template.id }));

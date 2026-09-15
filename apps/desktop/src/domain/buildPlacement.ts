@@ -365,6 +365,16 @@ export function updateAttachmentHierarchy(entities: MapEntity[], parentId: strin
   const before = entities.find((entry) => entry.id === parentId);
   if (!before) return entities;
   const after = { ...before, ...update };
+  if (before.worldAccess && !update.worldAccess && (update.position || update.rotation || update.scale)) {
+    // Building meshes use right-handed Y rotation; attachment snapping uses
+    // clockwise floor-plan angles, so invert that adapter's yaw here.
+    const oldFrame={...before,rotation:{...before.rotation,y:-before.rotation.y}};
+    const newFrame={...after,rotation:{...after.rotation,y:-after.rotation.y}};
+    after.worldAccess = {
+      entrance: attachmentWorldPosition(attachmentLocalPosition(before.worldAccess.entrance, oldFrame), newFrame),
+      anchor: attachmentWorldPosition(attachmentLocalPosition(before.worldAccess.anchor, oldFrame), newFrame),
+    };
+  }
   const result = new Map(entities.map((entry) => [entry.id, entry.id === parentId ? after : entry]));
   const moveChildren = (oldParent: MapEntity, newParent: MapEntity): void => {
     for (const child of entities.filter((entry) => entry.build?.parentId === oldParent.id)) {

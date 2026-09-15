@@ -6,6 +6,7 @@ import type { CampaignScene, TokenAsset } from "./types";
 const token = (): TokenAsset => ({ id: "token-a", name: "Frog", kind: "player", storageKey: "x", filename: "x.glb", byteLength: 1, footprint: 1, modelScale: 1, modelLift: 0, defaultPlacementScale: 1, base: { shape: "round", color: "#000000", accentColor: "#ffffff", height: .14 }, source: "import", states: [{ id: "state-a", formId: "frog-form", name: "Frog", storageKey: "x", filename: "x.glb", byteLength: 1, modelScale: 1, modelLift: 0, animations: [], createdAt: "now" }], createdAt: "now", gameplayAuthority: "mesh-token" });
 
 describe("scenic baseplates", () => {
+  it("keeps a token's base when no character sheet is attached",()=>{const t=token();t.defaultBasePlateAssetId='pond';expect(resolveBasePlateAssetId({campaign:createStarterCampaign(),token:t,characterId:''})).toBe('pond');});
   it("creates deterministic contextual concepts", () => expect(createBasePlateConcepts("frog beside a lily pond").map((item) => item.preset)[0]).toBe("pond"));
   it("caps visual overhang and unique geometry", () => {
     const recipe = createBasePlateRecipe("grass");

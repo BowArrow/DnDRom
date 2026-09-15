@@ -1,3 +1,4 @@
+import { prepareLanguageSettings } from "./managedLanguage";
 import { z } from "zod";
 import type { CampaignPlan, CampaignSettings, LocationKind, MapTheme, PointOfInterest, StoryBeat, WorldLocation, WorldPlan } from "../domain/types";
 import { completeLocalChat, extractJson } from "./openAiClient";
@@ -204,6 +205,7 @@ export async function createStoryFirstCampaign(
   settings: CampaignSettings,
   signal?: AbortSignal,
 ): Promise<{ plan: CampaignPlan; world: WorldPlan; provider: "local-ai" | "procedural"; warning?: string }> {
+  settings = await prepareLanguageSettings(settings, signal);
   let raw: RawCampaign;
   let provider: "local-ai" | "procedural" = "procedural";
   let warning: string | undefined;

@@ -1,0 +1,37 @@
+float2 p=WorldPosition.xy*.01,uv=(p-WaterWindow.xy)/WaterWindow.z;
+float4 info=Texture2DSampleLevel(CoastalInfo,CoastalInfoSampler,uv,0);
+float valid=WaterReady*info.a*(all(uv>0)&&all(uv<1)?1:0)*(1-smoothstep(.6,1.2,abs(WorldPosition.z*.01-info.b)));
+float edge=saturate(min(min(uv.x,uv.y),min(1-uv.x,1-uv.y))*16);
+float depth=lerp(WaterData.r*4,info.r,valid),shore=lerp(WaterData.g*24,info.g,valid);
+float h=coast.height(p,depth,shore,WaveTime)*valid*edge*coast.energy(CoastalInfo,CoastalInfoSampler,uv,WaterWindow.z);
+WetMask=lerp(1.,smoothstep(.001,.022,depth+h),valid*edge);
+float2 slope;float3 unusedCurvature;
+coast.fine(p,WaveTime,max(length(ddx(p)),length(ddy(p))),slope,unusedCurvature);
+slope*=smoothstep(.01,.3,depth);
+float2 dx=ddx(p),dy=ddy(p);float det=dx.x*dy.y-dx.y*dy.x;
+if(abs(det)>1e-9) slope+=float2(ddx(h)*dy.y-ddy(h)*dx.y,dx.x*ddy(h)-dy.x*ddx(h))/det;
+float density=Texture2DSampleLevel(FoamState,FoamStateSampler,uv,0).r*valid*edge;
+float2 foamP=p+float2(.10,.055)*WaveTime;
+float broad=coast.noise(foamP*2.7+coast.noise(foamP*.7)*1.8),fine=coast.noise(foamP*10.3);
+float detail=.68*broad+.32*fine;
+float coverage=saturate(density*.68);
+float resolved=smoothstep(.71-coverage*.34,.79-coverage*.34,detail);
+float filter=smoothstep(.03,.2,length(fwidth(p)));
+Foam=lerp(resolved,coverage*.28,filter)*smoothstep(.025,.18,density)*WetMask;
+Normal=normalize(float3(-slope*(1-Foam*.55),1));
+// Perspective receiver from pre-water view depth. This is a bounded optical
+// approximation. No cellular pattern: folds use the moving wave curvature.
+float validReceiver=BehindDepth>SurfaceDepth&&BehindDepth<1e7&&SurfaceDepth>1?1:0;
+float3 receiver=CameraPosition+(WorldPosition-CameraPosition)*(BehindDepth/max(SurfaceDepth,1));
+float receiverDepth=max(0,(WorldPosition.z-receiver.z)*.01);
+float3 curvature=0;float2 unusedSlope;
+float2 rp=receiver.xy*.01;
+float receiverFootprint=max(length(ddx(rp)),length(ddy(rp)));
+if(validReceiver>0&&receiverDepth>.12&&receiverDepth<5&&SunStrength>.001)coast.fine(rp,WaveTime,receiverFootprint,unusedSlope,curvature);
+float focus=min(receiverDepth,2.5)*.35;
+float jacobian=(1+focus*curvature.x)*(1+focus*curvature.z)-pow(focus*curvature.y,2);
+float width=max(.045,fwidth(jacobian)*.65);
+float focal=1-smoothstep(width,width*2.2,abs(jacobian));
+float causticMask=validReceiver*smoothstep(.12,.45,receiverDepth)*(1-smoothstep(2.5,5.,receiverDepth))*(1-Foam)*SunStrength;
+Caustics=lerp(1.,.94+focal*1.8,causticMask);
+return lerp(float3(.008,.018,.023),float3(.77,.81,.79),Foam);

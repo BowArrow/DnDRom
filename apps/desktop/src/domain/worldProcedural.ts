@@ -1,3 +1,6 @@
+import { simulateHydraulicErosion } from "./hydraulicErosion";
+import {createSiteTerrain,siteWater,siteSurface} from "./worldSite";
+import { regionalElevation } from "./worldGeography";
 import type { WorldBlueprintV1, WorldTerrainGeometry, WorldZone } from "./types";
 
 export interface HeightfieldData {
@@ -33,6 +36,11 @@ export interface HydrologyField {
   maximumAccumulation: number;
   filledCellCount: number;
   maximumFillDepth: number;
+  /** Time-averaged particle volume per cell, shaped to 0..1. */
+  streamMap: number[];
+  /** Time-averaged stream momentum used for directional flow and meanders. */
+  momentumX: number[];
+  momentumZ: number[];
 }
 export interface DepressionFillResult {
   filledHeights: number[];
@@ -49,6 +57,7 @@ export interface SplinePoint { x: number; z: number }
 export interface ProceduralRoom { id: string; x: number; z: number; width: number; depth: number; connections: string[] }
 export interface TerrainSurfaceWeights { soil: number; vegetation: number; rock: number; wet: number; snow: number; road: number }
 export interface WorldFieldSet {
+  preserveBoundary?:boolean;
   resolution: number;
   cellSize: number;
   originX: number;
@@ -58,14 +67,59 @@ export interface WorldFieldSet {
   elevation: number[];
   /** Continuous eroded/carved elevation used by hydrology and shore masks. */
   waterElevation: number[];
+  /** Signed scalar field for the accepted water topology. Positive samples
+   * are wet; zero is the shared shoreline used by terrain and rendering. */
+  waterMask: number[];
+  /** Absolute surface elevation for streams, retained lakes, and sea. Dry
+   * samples remain finite so contour interpolation cannot create spikes. */
+  waterSurface: number[];
+  /** Physical water depth in meters at accepted wet samples. */
+  waterDepth: number[];
   filledElevation: number[];
+  /** Standing-water depth created by depression filling. Streams and pools
+   * remain separate authoritative fields, following the coupled hydrology
+   * model described by McDonald (2020). */
+  poolDepth: number[];
+  streamMap: number[];
+  momentumX: number[];
+  momentumZ: number[];
+  soilDepth: number[];
+  screeDepth: number[];
+  bedrockExposure: number[];
+  saturation: number[];
   flowDirection: number[];
   accumulation: number[];
   slope: number[];
   curvature: number[];
   moisture: number[];
   sediment: number[];
+  /** Loose aeolian sediment above the immobile terrain layer. */
+  aeolianSediment: number[];
+  /** Normalized ground-contact frequency of wind particles. */
+  windPath: number[];
+  /** Normalized solid-to-loose conversion caused by wind abrasion. */
+  abrasion: number[];
   hydrology: HydrologyField;
+}
+
+/** Observable input to the erosion stack. Keeping this as a small diagnostic
+ * API makes it possible to prove that an erosion pass received real relief
+ * instead of accepting a nearly flat field and merely producing activity
+ * maps. */
+export interface InitialTerrainField {
+  resolution: number;
+  cellSize: number;
+  originX: number;
+  originZ: number;
+  elevation: number[];
+}
+
+export interface AeolianErosionField {
+  height: number[];
+  sediment: number[];
+  windPath: number[];
+  abrasion: number[];
+  windDirection: { x: number; z: number };
 }
 
 const clamp = (value: number, minimum: number, maximum: number): number => Math.min(maximum, Math.max(minimum, value));
@@ -118,16 +172,34 @@ export function terrainNoise(x: number, z: number, seed: number, roughness = .5)
 
 /** Slope/elevation/moisture weights used by the terrain material layer. */
 export function terrainSurfaceWeights(geometry: WorldTerrainGeometry, x: number, z: number, normalY: number): TerrainSurfaceWeights {
+  const layerAt = (values?: number[]) => {
+    if (!values || !geometry.heightfield || values.length !== geometry.heightfield.resolution ** 2) return 0;
+    const resolution = geometry.heightfield.resolution;
+    const gridX = clamp((x - geometry.originX) / geometry.size * (resolution - 1), 0, resolution - 1), gridZ = clamp((z - geometry.originZ) / geometry.size * (resolution - 1), 0, resolution - 1);
+    const x0 = Math.floor(gridX), z0 = Math.floor(gridZ), x1 = Math.min(resolution - 1, x0 + 1), z1 = Math.min(resolution - 1, z0 + 1), tx = gridX - x0, tz = gridZ - z0;
+    const top = values[z0 * resolution + x0] + (values[z0 * resolution + x1] - values[z0 * resolution + x0]) * tx;
+    const bottom = values[z1 * resolution + x0] + (values[z1 * resolution + x1] - values[z1 * resolution + x0]) * tx;
+    return top + (bottom - top) * tz;
+  };
   const slope = clamp(1 - Math.abs(normalY), 0, 1);
+  if(geometry.worldSite){
+    const weights=siteSurface(geometry.worldSite,geometry.seed,x,z,sampleTerrainHeight(geometry,x,z),normalY);
+    const road=geometry.worldSite.shared?weights.road:geometry.heightfield?.roadWeights?layerAt(geometry.heightfield.roadWeights):roadSurfaceWeight(geometry,x,z);
+    return {...weights,rock:weights.rock*(1-road),vegetation:weights.vegetation*(1-road),snow:weights.snow*(1-road),road};
+  }
   const elevation = geometry.relief > .001 ? clamp((sampleTerrainHeight(geometry, x, z) - geometry.baseHeight) / geometry.relief + .5, 0, 1) : .5;
   const moistureNoise = terrainNoise(x - 907, z + 613, geometry.seed + 2903, .48);
   const riverDistance = (geometry.rivers ?? []).reduce((nearest, river) => Math.min(nearest, distanceToSegment(x, z, river.ax, river.az, river.bx, river.bz) / Math.max(.2, river.width)), Number.POSITIVE_INFINITY);
-  const wet = clamp((1 - Math.min(1, riverDistance / 2.4)) * .82 + moistureNoise * .18, 0, 1);
+  const saturation = layerAt(geometry.heightfield?.saturation), bedrockExposure = layerAt(geometry.heightfield?.bedrockExposure), screeDepth = layerAt(geometry.heightfield?.screeDepth), soilDepth = layerAt(geometry.heightfield?.soilDepth);
+  const aeolianSediment = layerAt(geometry.heightfield?.aeolianSediment), abrasion = layerAt(geometry.heightfield?.abrasion);
+  const wet = clamp(Math.max((1 - Math.min(1, riverDistance / 2.4)) * .82 + moistureNoise * .18, saturation * .88), 0, 1);
   const snowBiome = geometry.biomeId === "snow";
   const snow = snowBiome ? clamp((elevation - .48) * 2.2 + (1 - slope) * .35, 0, 1) : 0;
-  const rock = clamp(slope * 2.35 + Math.max(0, elevation - .72) * 1.5 - snow * .65, 0, 1);
-  const vegetation = clamp((1 - slope * 2.6) * (1 - wet * .55) * (1 - snow) * (.62 + moistureNoise * .38), 0, 1);
-  const road = roadSurfaceWeight(geometry, x, z);
+  const desert = geometry.biomeId === "desert";
+  const rock = clamp(Math.max(slope * 2.35 + Math.max(0, elevation - .72) * 1.5, bedrockExposure * .92 + screeDepth * .18, desert ? abrasion * .76 - aeolianSediment * .24 : 0) - snow * .65, 0, 1);
+  const vegetatedBiomeBias = geometry.biomeId === "forest" ? .22 : geometry.biomeId === "plains" ? .18 : geometry.biomeId === "swamp" ? .12 : 0;
+  const vegetation = clamp(((1 - slope * 2.6) * (1 - wet * .55) * (1 - snow) * (.62 + moistureNoise * .38) * clamp(.35 + soilDepth, .35, 1.25) + vegetatedBiomeBias * (1 - slope) * (1 - wet)) * (desert ? .055 : 1), 0, 1);
+  const road = geometry.heightfield?.roadWeights ? layerAt(geometry.heightfield.roadWeights) : roadSurfaceWeight(geometry, x, z);
   const natural = 1 - road;
   const soil = Math.max(0, 1 - rock - vegetation * .72 - wet * .35 - snow);
   const total = Math.max(.0001, soil + vegetation + rock + wet + snow);
@@ -352,21 +424,67 @@ const buildDrainage = (raw: readonly number[], resolution: number, cellSize: num
       width: .45 + strength * 2.35, depth: .16 + strength * .82, flow: accumulation[index],
     });
   }
-  return { resolution, cellSize, filledHeights: filled, flowDirection, accumulation, riverSegments, maximumAccumulation, filledCellCount: depressionFill.filledCellCount, maximumFillDepth: depressionFill.maximumFillDepth };
+  return {
+    resolution, cellSize, filledHeights: filled, flowDirection, accumulation, riverSegments, maximumAccumulation,
+    filledCellCount: depressionFill.filledCellCount, maximumFillDepth: depressionFill.maximumFillDepth,
+    streamMap: new Array(raw.length).fill(0), momentumX: new Array(raw.length).fill(0), momentumZ: new Array(raw.length).fill(0),
+  };
 };
 
+const prevailingWindDirection = (seed: number): { x: number; z: number } => {
+  const angle = hash(seed, 17, seed + 7369) * Math.PI * 2;
+  return { x: Math.cos(angle), z: Math.sin(angle) };
+};
+
+/** Multi-band initial condition for the geomorphology passes. The previous
+ * field devoted almost all of its energy to wavelengths near the region size;
+ * erosion and one-meter terracing consequently received a broad plane. This
+ * spectrum supplies continental uplift, hills, ridges, and meter-scale relief.
+ * Desert-only wind-aligned mounds are intentionally just initial sediment
+ * structure: the particle pass still owns transport, slip faces, and abrasion. */
 const landformHeight = (blueprint: WorldBlueprintV1, x: number, z: number): number => {
   if (blueprint.kind === "interior" || blueprint.kind === "dungeon") return blueprint.terrain.baseHeight;
-  const relief = Math.max(.15, blueprint.terrain.relief);
-  const macro = terrainNoise(x * .55, z * .55, blueprint.seed + 101, .5);
-  const detail = terrainNoise(x * 1.8, z * 1.8, blueprint.seed + 809, blueprint.terrain.roughness);
-  const ridged = 1 - Math.abs(terrainNoise(x * .82 + 410, z * .82 - 270, blueprint.seed + 1601, .62) * 2 - 1);
+  const reliefMultiplier = blueprint.biome.id === "mountains" ? 1.62
+    : blueprint.biome.id === "desert" ? 1.58
+      : blueprint.biome.id === "forest" || blueprint.biome.id === "snow" ? 1.42
+        : blueprint.biome.id === "plains" ? 1.28
+          : blueprint.biome.id === "swamp" || blueprint.biome.id === "coast" ? 1.16
+            : 1.3;
+  const relief = Math.max(.15, blueprint.terrain.relief) * reliefMultiplier;
+  const macro = terrainNoise(x * .68, z * .68, blueprint.seed + 101, .54) - .5;
+  const hills = terrainNoise(x * 1.72 + 193, z * 1.72 - 127, blueprint.seed + 809, .58) - .5;
+  const detail = terrainNoise(x * 4.1 - 311, z * 4.1 + 241, blueprint.seed + 1229, blueprint.terrain.roughness) - .5;
+  const ridged = 1 - Math.abs(terrainNoise(x * 2.35 + 410, z * 2.35 - 270, blueprint.seed + 1601, .62) * 2 - 1);
+  const regionalUplift = simplexNoise2D(x * .018 + 37, z * .018 - 19, blueprint.seed + 2221);
   const normalizedX = x / Math.max(1, blueprint.width * .5), normalizedZ = z / Math.max(1, blueprint.depth * .5);
   const continental = clamp(1 - Math.hypot(normalizedX, normalizedZ) * .22, .35, 1);
-  const mountainBias = blueprint.biome.id === "mountains" ? .48 : .16;
+  const mountainBias = blueprint.biome.id === "mountains" ? .62 : .2;
   const basinBias = blueprint.biome.id === "swamp" || blueprint.biome.id === "coast" ? -.15 * (1 - Math.min(1, Math.hypot(normalizedX, normalizedZ))) : 0;
-  return blueprint.terrain.baseHeight + relief * (((macro - .5) * .72 + (detail - .5) * .22 + (ridged - .55) * mountainBias) * continental + basinBias);
+  let shape = macro * .94 + hills * .58 + detail * .24 + (regionalUplift - .5) * .48 + (ridged - .55) * mountainBias;
+  if (blueprint.biome.id === "desert") {
+    const wind = prevailingWindDirection(blueprint.seed);
+    const along = x * wind.x + z * wind.z;
+    const across = -x * wind.z + z * wind.x;
+    const phaseWarp = (terrainNoise(x * .72 + 613, z * .72 - 449, blueprint.seed + 2467, .57) - .5) * 8.5;
+    const phase = (along + phaseWarp + Math.sin(across * .047) * 3.4) * .245;
+    const asymmetric = (Math.sin(phase) + .36 * Math.sin(phase * 2 + .55) + .14 * Math.sin(phase * 3 + 1.1)) / 1.5;
+    const duneEnvelope = .28 + terrainNoise(across * .62 - 173, along * .24 + 337, blueprint.seed + 2539, .6) * .72;
+    const transverse = (terrainNoise(across * 1.9, along * .52, blueprint.seed + 2609, .5) - .5) * .22;
+    shape = macro * .78 + hills * .38 + (regionalUplift - .5) * .32 + (ridged - .55) * .19 + asymmetric * duneEnvelope * .76 + transverse;
+  }
+  return blueprint.terrain.baseHeight + relief * (shape * continental + basinBias);
 };
+
+export function buildInitialTerrainField(blueprint: WorldBlueprintV1, requestedCellSize = 1): InitialTerrainField {
+  const resolution = Math.round(Math.max(blueprint.width, blueprint.depth) / requestedCellSize) + 1;
+  const cellSize = blueprint.width / (resolution - 1), originX = -blueprint.width / 2, originZ = -blueprint.depth / 2;
+  const elevation = new Array(resolution * resolution);
+  for (let z = 0; z < resolution; z++) for (let x = 0; x < resolution; x++) {
+    const wx = originX + x * cellSize, wz = originZ + z * cellSize;
+    elevation[z * resolution + x] = landformHeight(blueprint, wx, wz) + regionalElevation(blueprint.biomeRegions ?? [], wx, wz);
+  }
+  return { resolution, cellSize, originX, originZ, elevation };
+}
 
 const thermalErode = (source: readonly number[], resolution: number, strength: number, passes: number): number[] => {
   let heights = [...source];
@@ -390,26 +508,309 @@ const thermalErode = (source: readonly number[], resolution: number, strength: n
   return heights;
 };
 
+/**
+ * Deterministic particle-based aeolian erosion for arid biomes. The terrain is
+ * split into an immobile solid layer and movable sediment. Particles enter on
+ * the upwind boundary, are accelerated by the prevailing wind, abrade exposed
+ * rock, suspend loose grains on contact, deposit while airborne, and trigger a
+ * local time-deferred angle-of-repose cascade whenever sediment changes.
+ *
+ * This follows the compact model described by McDonald (2020), adapted to the
+ * Forge's meter-scale global field. It runs once per region before chunks are
+ * cut, so dunes and wind shadows never restart at a chunk boundary.
+ */
+export function simulateParticleWindErosion(source: readonly number[], resolution: number, seed: number, strength = .7): AeolianErosionField {
+  if (source.length !== resolution * resolution) throw new Error("Aeolian erosion source must be a square field");
+  const intensity = clamp(strength, 0, 1);
+  const initialSediment = source.map((_, index) => {
+    const column = index % resolution, row = Math.floor(index / resolution);
+    const broad = simplexNoise2D(column * .025, row * .025, seed + 7307);
+    const detail = terrainNoise(column * .42, row * .42, seed + 7331, .48);
+    return .08 + broad * .42 + detail * .1;
+  });
+  const solid = source.map((height, index) => height - initialSediment[index]);
+  const sediment = [...initialSediment], windPath = new Array(source.length).fill(0), abrasion = new Array(source.length).fill(0);
+  const windDirection = prevailingWindDirection(seed);
+  const prevailingSpeed = 1.15 + intensity * .72;
+  const dt = .36;
+  const roughness = .2 + (1 - intensity) * .08;
+  const settling = .16 + intensity * .08;
+  // Several boundary cycles are still inexpensive at region resolution and
+  // move enough mass to produce visible terrain instead of activity-only maps.
+  const particleCount = Math.max(640, Math.round(resolution * (12 + intensity * 8)));
+  const maximumSteps = Math.ceil(resolution * 2.75);
+  const random = (particle: number, channel: number) => hash(particle * 8191 + channel * 131, channel * 104729, seed + 7411);
+  const combined = (index: number) => solid[index] + sediment[index];
+  const cascade = (center: number) => {
+    const centerX = center % resolution, centerZ = Math.floor(center / resolution);
+    // A small, time-deferred exchange is intentional: seeking an immediate
+    // globally stable pile creates order-dependent artifacts at dune crests.
+    for (let pass = 0; pass < 2; pass++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      if ((!dx && !dz) || centerX + dx < 0 || centerX + dx >= resolution || centerZ + dz < 0 || centerZ + dz >= resolution) continue;
+      const neighbor = (centerZ + dz) * resolution + centerX + dx;
+      const distance = dx && dz ? Math.SQRT2 : 1;
+      const difference = combined(center) - combined(neighbor);
+      const excess = Math.abs(difference) - roughness * distance;
+      if (excess <= 0) continue;
+      const high = difference > 0 ? center : neighbor, low = difference > 0 ? neighbor : center;
+      const transfer = Math.min(sediment[high], excess * .5) * dt * settling;
+      sediment[high] -= transfer;
+      sediment[low] += transfer;
+    }
+  };
+  const gradientAt = (column: number, row: number) => {
+    const left = row * resolution + Math.max(0, column - 1), right = row * resolution + Math.min(resolution - 1, column + 1);
+    const down = Math.max(0, row - 1) * resolution + column, up = Math.min(resolution - 1, row + 1) * resolution + column;
+    return { x: (combined(right) - combined(left)) * .5, z: (combined(up) - combined(down)) * .5 };
+  };
+  for (let particle = 0; particle < particleCount; particle++) {
+    const alongEdge = 1 + random(particle, 0) * Math.max(1, resolution - 3);
+    let x: number, z: number;
+    if (Math.abs(windDirection.x) >= Math.abs(windDirection.z)) {
+      x = windDirection.x > 0 ? 1.1 : resolution - 2.1;
+      z = alongEdge;
+    } else {
+      x = alongEdge;
+      z = windDirection.z > 0 ? 1.1 : resolution - 2.1;
+    }
+    let column = Math.floor(x), row = Math.floor(z), index = row * resolution + column;
+    let particleHeight = combined(index) + .01 + random(particle, 1) * .045;
+    let speedX = windDirection.x * prevailingSpeed, speedZ = windDirection.z * prevailingSpeed, speedY = (random(particle, 2) - .5) * .035;
+    let carried = .008 + random(particle, 3) * .018, previous = index;
+    for (let step = 0; step < maximumSteps; step++) {
+      column = Math.floor(x); row = Math.floor(z);
+      if (column < 1 || row < 1 || column >= resolution - 1 || row >= resolution - 1) break;
+      index = row * resolution + column;
+      const surface = combined(index), velocity = Math.max(.001, Math.hypot(speedX, speedY, speedZ));
+      const contact = particleHeight <= surface + .045;
+      if (contact) {
+        particleHeight = surface;
+        const gradient = gradientAt(column, row);
+        // Deflect along the local surface rather than elastically bouncing.
+        speedX += (-gradient.x * .38 + windDirection.x * .24) * dt;
+        speedZ += (-gradient.z * .38 + windDirection.z * .24) * dt;
+        speedY = gradient.x * speedX + gradient.z * speedZ;
+        const force = velocity * (.035 + Math.abs(combined(previous) - surface));
+        const capacity = (.018 + force * .075) * (.45 + intensity * .9);
+        if (sediment[index] > .018 && carried < capacity) {
+          const lifted = Math.min(sediment[index], (capacity - carried) * dt * .72);
+          sediment[index] -= lifted; carried += lifted;
+        } else if (carried > .002) {
+          const removed = Math.min(.0065, force * carried * (.08 + intensity * .16));
+          solid[index] -= removed;
+          sediment[index] += removed * .35;
+          carried += removed * .65;
+          abrasion[index] += removed;
+        }
+        windPath[index] += .018;
+        cascade(index);
+      } else {
+        speedY -= dt * .075;
+        const dropped = Math.min(carried, carried * dt * (.045 + (1 - intensity) * .025));
+        carried -= dropped;
+        sediment[index] += dropped * .5;
+        sediment[previous] += dropped * .5;
+        cascade(index); cascade(previous);
+      }
+      const turbulence = (simplexNoise2D(x * .055, z * .055, seed + 7459) - .5) * .11;
+      const targetX = windDirection.x * prevailingSpeed - windDirection.z * turbulence;
+      const targetZ = windDirection.z * prevailingSpeed + windDirection.x * turbulence;
+      speedX += (targetX - speedX) * dt * .16;
+      speedZ += (targetZ - speedZ) * dt * .16;
+      previous = index;
+      x += speedX * dt; z += speedZ * dt; particleHeight += speedY * dt;
+      if (Math.hypot(speedX, speedZ) < .012) break;
+    }
+    // Sediment carried out of the region is intentionally lost; otherwise it
+    // settles at the last valid cell and participates in the next cascade.
+    if (x >= 0 && z >= 0 && x < resolution && z < resolution && carried > 0) {
+      sediment[previous] += carried;
+      cascade(previous);
+    }
+  }
+  const normalize = (values: number[]) => {
+    const maximum = values.reduce((largest, value) => Math.max(largest, value), .000001);
+    return values.map((value) => clamp(value / maximum, 0, 1));
+  };
+  return {
+    height: solid.map((height, index) => height + Math.max(0, sediment[index])),
+    sediment: sediment.map((value) => Math.max(0, value)),
+    windPath: normalize(windPath),
+    abrasion: normalize(abrasion),
+    windDirection,
+  };
+}
+
+/** McDonald-style coupled particle hydrology (2023): droplets move continuously with bilinear
+ * gradients and conservative deposition, accumulate discharge and momentum, and
+ * feed those persistent maps back into both motion and sediment capacity.
+ * This produces the river field itself; no path graph or spline is rendered. */
+export const simulateCoupledParticleHydrology = (source: readonly number[], resolution: number, seed: number, erosion: number, vegetation: number, cellSize=1) => {
+  const result=simulateHydraulicErosion(source,resolution,cellSize,seed,clamp(erosion,0,1)*(1-vegetation*.25),256);
+  const soilDepth=source.map((_,i)=>Math.max(0,.65+Math.min(0,result.delta[i])));
+  const screeDepth=source.map((_,i)=>Math.max(0,result.delta[i]));
+  const bedrockExposure=soilDepth.map(soil=>clamp(1-soil/.65,0,1));
+  return {height:Array.from(result.height),streamMap:Array.from(result.discharge),momentumX:Array.from(result.momentumX),momentumZ:Array.from(result.momentumZ),soilDepth,screeDepth,bedrockExposure,exportedSediment:result.exportedSediment};
+};
+
+/** Convert the noisy per-particle visitation map into a connected channel
+ * field. Accumulation supplies topology (every accepted headwater remains
+ * connected to a basin or boundary outlet); particle discharge and momentum
+ * vary width and current without manufacturing disconnected blue fragments. */
+const buildConnectedStreamField = (drainage: HydrologyField, particleStream: readonly number[], particleMomentumX: readonly number[], particleMomentumZ: readonly number[], resolution: number) => {
+  const raw = new Array(particleStream.length).fill(0);
+  const maximum = Math.max(1, drainage.maximumAccumulation);
+  const threshold = Math.max(48, resolution * resolution * .012, maximum * .12);
+  const logThreshold = Math.log1p(threshold), logMaximum = Math.log1p(maximum);
+  for (let index = 0; index < raw.length; index++) {
+    const accumulated = drainage.accumulation[index];
+    if (accumulated < threshold || drainage.flowDirection[index] < 0) continue;
+    const topology = clamp((Math.log1p(accumulated) - logThreshold) / Math.max(.0001, logMaximum - logThreshold), 0, 1);
+    raw[index] = clamp(.26 + smoother(topology) * .74 + particleStream[index] * .12, 0, 1);
+  }
+  const streamMap = [...raw], momentumX = new Array(raw.length).fill(0), momentumZ = new Array(raw.length).fill(0);
+  for (let row = 0; row < resolution; row++) for (let column = 0; column < resolution; column++) {
+    const sourceIndex = row * resolution + column, strength = raw[sourceIndex];
+    if (strength <= 0) continue;
+    const next = drainage.flowDirection[sourceIndex];
+    const nextColumn = next >= 0 ? next % resolution : column, nextRow = next >= 0 ? Math.floor(next / resolution) : row;
+    const d8X = nextColumn - column, d8Z = nextRow - row;
+    const particleX = particleMomentumX[sourceIndex], particleZ = particleMomentumZ[sourceIndex];
+    const mixedX = d8X + particleX * .18, mixedZ = d8Z + particleZ * .18;
+    const mixedLength = Math.max(.0001, Math.hypot(mixedX, mixedZ));
+    const radius = 1 + Math.round(strength * 2.2);
+    for (let dz = -radius; dz <= radius; dz++) for (let dx = -radius; dx <= radius; dx++) {
+      const x = column + dx, z = row + dz;
+      if (x < 0 || z < 0 || x >= resolution || z >= resolution) continue;
+      const distance = Math.hypot(dx, dz);
+      if (distance > radius + .2) continue;
+      const falloff = distance < .01 ? 1 : smoother(clamp(1 - distance / (radius + .35), 0, 1));
+      const candidate = strength * falloff;
+      const target = z * resolution + x;
+      if (candidate <= streamMap[target]) continue;
+      streamMap[target] = candidate;
+      momentumX[target] = mixedX / mixedLength;
+      momentumZ[target] = mixedZ / mixedLength;
+    }
+  }
+  // One separable-looking 3x3 relaxation removes D8 stair steps while
+  // retaining the exact connected centerline and its boundary outlet.
+  const softened = [...streamMap];
+  for (let row = 1; row < resolution - 1; row++) for (let column = 1; column < resolution - 1; column++) {
+    const index = row * resolution + column;
+    const axial = streamMap[index - 1] + streamMap[index + 1] + streamMap[index - resolution] + streamMap[index + resolution];
+    const diagonal = streamMap[index - resolution - 1] + streamMap[index - resolution + 1] + streamMap[index + resolution - 1] + streamMap[index + resolution + 1];
+    softened[index] = Math.max(streamMap[index] * .58 + axial * .075 + diagonal * .035, streamMap[index] * .78);
+  }
+  return { streamMap: softened, momentumX, momentumZ };
+};
+
+interface RetainedLakeField { mask: number[]; surface: number[] }
+
+/** Keep only hydrologically meaningful basins. Wang-Liu identifies every
+ * depression, including sub-meter noise pits; rendering all of them is what
+ * produced the disconnected pond web. Each retained component receives one
+ * spill elevation, making its surface planar while its shoreline remains an
+ * interpolated contour. */
+const retainLakeBasins = (poolDepth: readonly number[], filledElevation: readonly number[], resolution: number, biomeId: WorldBlueprintV1["biome"]["id"]): RetainedLakeField => {
+  const visited = new Uint8Array(poolDepth.length);
+  const components: Array<{ indices: number[]; volume: number; maximumDepth: number }> = [];
+  for (let start = 0; start < poolDepth.length; start++) {
+    if (visited[start] || poolDepth[start] <= .11) continue;
+    const indices: number[] = [], pending = [start];
+    let volume = 0, maximumDepth = 0;
+    visited[start] = 1;
+    while (pending.length) {
+      const index = pending.pop()!;
+      indices.push(index); volume += poolDepth[index]; maximumDepth = Math.max(maximumDepth, poolDepth[index]);
+      for (const next of gridNeighbors(index, resolution)) {
+        if (visited[next] || poolDepth[next] <= .075 || Math.abs(filledElevation[next] - filledElevation[index]) > .16) continue;
+        visited[next] = 1; pending.push(next);
+      }
+    }
+    if (indices.length >= (biomeId === "swamp" ? 18 : 28) && maximumDepth >= .16) components.push({ indices, volume, maximumDepth });
+  }
+  const maximumLakes = biomeId === "swamp" ? 5 : biomeId === "coast" ? 3 : 2;
+  const retained = components.sort((left, right) => right.volume - left.volume).slice(0, maximumLakes);
+  const mask = new Array(poolDepth.length).fill(-1), surface = new Array(poolDepth.length).fill(Number.NEGATIVE_INFINITY);
+  for (const component of retained) {
+    const levels = component.indices.map((index) => filledElevation[index]).sort((a, b) => a - b);
+    const spillElevation = levels[Math.floor(levels.length * .55)] - .035;
+    for (const index of component.indices) {
+      mask[index] = clamp((poolDepth[index] - .055) / .32, .04, 1);
+      surface[index] = spillElevation;
+    }
+  }
+  return { mask, surface };
+};
+
 /** Builds the region once, globally. Every chunk is then sampled from this
  * authority so terrain, drainage, roads, ecology, and navigation agree. */
 export function buildWorldFieldSet(blueprint: WorldBlueprintV1, requestedCellSize = 1): WorldFieldSet {
-  const resolution = Math.round(Math.max(blueprint.width, blueprint.depth) / requestedCellSize) + 1;
-  const cellSize = blueprint.width / (resolution - 1), originX = -blueprint.width / 2, originZ = -blueprint.depth / 2;
-  const raw = new Array(resolution * resolution);
-  for (let z = 0; z < resolution; z++) for (let x = 0; x < resolution; x++) raw[z * resolution + x] = landformHeight(blueprint, originX + x * cellSize, originZ + z * cellSize);
-  const eroded = thermalErode(raw, resolution, clamp(blueprint.terrain.erosion, 0, 1), 5 + Math.round(blueprint.terrain.erosion * 7));
+  if(blueprint.site&&blueprint.kind!=="interior"&&blueprint.kind!=="dungeon")return buildSiteFieldSet(blueprint,requestedCellSize);
+  const initial = buildInitialTerrainField(blueprint, requestedCellSize);
+  const { resolution, cellSize, originX, originZ } = initial;
+  const raw = initial.elevation;
+  const desert = blueprint.biome.id === "desert";
+  const thermalStrength = desert ? blueprint.terrain.erosion * .16 : blueprint.terrain.erosion * .62;
+  const thermalPasses = desert ? 2 : 3 + Math.round(blueprint.terrain.erosion * 5);
+  const thermallySettled = thermalErode(raw, resolution, clamp(thermalStrength, 0, 1), thermalPasses);
+  const emptyAeolianLayer = () => new Array(raw.length).fill(0);
+  const aeolian = blueprint.biome.id === "desert" && blueprint.kind !== "interior" && blueprint.kind !== "dungeon"
+    ? simulateParticleWindErosion(thermallySettled, resolution, blueprint.seed, .5 + blueprint.terrain.erosion * .5)
+    : { height: thermallySettled, sediment: emptyAeolianLayer(), windPath: emptyAeolianLayer(), abrasion: emptyAeolianLayer(), windDirection: { x: 0, z: 0 } };
+  const coupled = blueprint.kind === "interior" || blueprint.kind === "dungeon"
+    ? { height: thermallySettled, streamMap: new Array(raw.length).fill(0), momentumX: new Array(raw.length).fill(0), momentumZ: new Array(raw.length).fill(0), soilDepth: new Array(raw.length).fill(1), screeDepth: new Array(raw.length).fill(0), bedrockExposure: new Array(raw.length).fill(0) }
+    : simulateCoupledParticleHydrology(aeolian.height, resolution, blueprint.seed, blueprint.biome.id === "desert" ? blueprint.terrain.erosion * .28 : blueprint.terrain.erosion, blueprint.biome.vegetationDensity, cellSize);
+  const eroded = thermalErode(coupled.height, resolution, clamp(blueprint.terrain.erosion * .55, 0, 1), 2 + Math.round(blueprint.terrain.erosion * 3));
   const initialDrainage = buildDrainage(eroded, resolution, cellSize, originX, originZ);
-  const threshold = Math.max(48, resolution * resolution * .1, initialDrainage.maximumAccumulation * .35);
-  const carveChannel = (height: number, index: number) => {
-    const flow = initialDrainage.accumulation[index];
-    if (flow < threshold) return height;
-    const normalized = Math.sqrt(flow / Math.max(1, initialDrainage.maximumAccumulation));
-    return height - (.1 + normalized * .9) * clamp(blueprint.terrain.moisture + .25, .25, 1);
-  };
-  const waterElevation = eroded.map(carveChannel);
-  const terraced = eroded.map((height) => blueprint.kind === "interior" || blueprint.kind === "dungeon" ? height : roundedTerraceHeight(height, blueprint.terrain.baseHeight));
-  const carved = terraced.map(carveChannel);
-  const hydrology = buildDrainage(waterElevation, resolution, cellSize, originX, originZ);
+  const connectedStreams = buildConnectedStreamField(initialDrainage, coupled.streamMap, coupled.momentumX, coupled.momentumZ, resolution);
+  const terraced = eroded.map((height, index) => {
+    if (blueprint.kind === "interior" || blueprint.kind === "dungeon") return height;
+    const column = index % resolution, row = Math.floor(index / resolution);
+    const worldX = originX + column * cellSize, worldZ = originZ + row * cellSize;
+    let gameplayInfluence = 0;
+    for (const zone of blueprint.zones) {
+      const distance = Math.hypot(worldX - zone.center.x, worldZ - zone.center.z);
+      gameplayInfluence = Math.max(gameplayInfluence, 1 - smoother(clamp((distance - zone.radius * .62) / Math.max(2, zone.radius * .72), 0, 1)));
+    }
+    // Terraces are gameplay affordances around authored zones, not a global
+    // quantizer. Keep the intervening watershed and dune slopes continuous.
+    const blend = (desert ? .018 : .035) + gameplayInfluence * (desert ? .3 : .38);
+    const stepped = roundedTerraceHeight(height, blueprint.terrain.baseHeight, 1, desert ? .5 : .32);
+    return height + (stepped - height) * blend;
+  });
+  let carved = terraced.map((height, index) => {
+    const stream = smoother(clamp((connectedStreams.streamMap[index] - .16) / .84, 0, 1));
+    return height - stream * (.12 + stream * .76) * clamp(blueprint.terrain.moisture + .42, .48, 1.15);
+  });
+  const drainage = buildDrainage(carved, resolution, cellSize, originX, originZ);
+  const rawPoolDepth = drainage.filledHeights.map((filled, index) => Math.max(0, filled - carved[index]));
+  const lakes = retainLakeBasins(rawPoolDepth, drainage.filledHeights, resolution, blueprint.biome.id);
+  const desertSurfaceWater = blueprint.biome.id !== "desert" || /oasis|river|lake|water|spring|wetland/i.test(blueprint.description);
+  const waterMask = new Array(carved.length).fill(-1), waterSurface = [...carved], waterDepth = new Array(carved.length).fill(0), poolDepth = new Array(carved.length).fill(0);
+  for (let index = 0; index < carved.length; index++) {
+    const stream = connectedStreams.streamMap[index];
+    const streamMask = desertSurfaceWater ? (stream - .18) / .44 : -1;
+    const streamSurface = Math.min(eroded[index] - .025, carved[index] + .085 + stream * .2);
+    const explicitSurface = blueprint.terrain.waterLevel === undefined ? Number.NEGATIVE_INFINITY : blueprint.terrain.waterLevel - .055;
+    const explicitMask = blueprint.terrain.waterLevel === undefined ? -1 : (explicitSurface - carved[index]) / .32;
+    const lakeMask = desertSurfaceWater ? lakes.mask[index] : -1;
+    let mask = streamMask, surface = streamSurface;
+    if (lakeMask > mask) { mask = lakeMask; surface = lakes.surface[index]; }
+    if (explicitMask > mask) { mask = explicitMask; surface = explicitSurface; }
+    waterMask[index] = clamp(mask, -1, 1);
+    if (mask > 0 && Number.isFinite(surface)) {
+      const minimumDepth = .065 + Math.max(0, mask) * .08;
+      carved[index] = Math.min(carved[index], surface - minimumDepth);
+      waterSurface[index] = surface;
+      waterDepth[index] = Math.max(minimumDepth, surface - carved[index]);
+      if (lakeMask > 0) poolDepth[index] = waterDepth[index];
+    } else waterSurface[index] = carved[index] + .018;
+  }
+  const waterElevation = [...carved];
+  const hydrology: HydrologyField = { ...drainage, streamMap: connectedStreams.streamMap, momentumX: connectedStreams.momentumX, momentumZ: connectedStreams.momentumZ };
+  const saturation = poolDepth.map((depth, index) => clamp(depth * 1.8 + connectedStreams.streamMap[index] * .54 + blueprint.terrain.moisture * .28, 0, 1));
   const slope = new Array(carved.length).fill(0), curvature = new Array(carved.length).fill(0), sediment = new Array(carved.length).fill(0), moisture = new Array(carved.length).fill(0);
   for (let z = 0; z < resolution; z++) for (let x = 0; x < resolution; x++) {
     const index = z * resolution + x, left = carved[z * resolution + Math.max(0, x - 1)], right = carved[z * resolution + Math.min(resolution - 1, x + 1)];
@@ -421,10 +822,39 @@ export function buildWorldFieldSet(blueprint: WorldBlueprintV1, requestedCellSiz
     const flowMoisture = Math.log1p(hydrology.accumulation[index]) / Math.log1p(Math.max(1, hydrology.maximumAccumulation));
     moisture[index] = clamp(blueprint.terrain.moisture * .6 + flowMoisture * .55 - slope[index] * .16, 0, 1);
   }
-  return { resolution, cellSize, originX, originZ, width: blueprint.width, depth: blueprint.depth, elevation: carved, waterElevation, filledElevation: hydrology.filledHeights, flowDirection: hydrology.flowDirection, accumulation: hydrology.accumulation, slope, curvature, moisture, sediment, hydrology };
+  const soilDepth = blueprint.biome.id === "desert"
+    ? aeolian.sediment.map((loose, index) => Math.max(.025, loose + coupled.soilDepth[index] * .08))
+    : coupled.soilDepth;
+  const screeDepth = blueprint.biome.id === "desert"
+    ? coupled.screeDepth.map((loose, index) => loose + aeolian.abrasion[index] * .16)
+    : coupled.screeDepth;
+  const bedrockExposure = blueprint.biome.id === "desert"
+    ? coupled.bedrockExposure.map((exposure, index) => clamp(Math.max(exposure, aeolian.abrasion[index] * .92 - aeolian.sediment[index] * .38), 0, 1))
+    : coupled.bedrockExposure;
+  return { resolution, cellSize, originX, originZ, width: blueprint.width, depth: blueprint.depth, elevation: carved, waterElevation, waterMask, waterSurface, waterDepth, filledElevation: hydrology.filledHeights, poolDepth, streamMap: connectedStreams.streamMap, momentumX: connectedStreams.momentumX, momentumZ: connectedStreams.momentumZ, soilDepth, screeDepth, bedrockExposure, saturation, flowDirection: hydrology.flowDirection, accumulation: hydrology.accumulation, slope, curvature, moisture, sediment, aeolianSediment: aeolian.sediment, windPath: aeolian.windPath, abrasion: aeolian.abrasion, hydrology };
 }
 
-export function sampleWorldField(field: WorldFieldSet, layer: "elevation" | "waterElevation" | "filledElevation" | "accumulation" | "slope" | "curvature" | "moisture" | "sediment", x: number, z: number): number {
+/** A scene is a sampled window of the evolved world, not a second terrain
+ * simulation. Roads may grade dry parcels, but cannot change its watershed. */
+function buildSiteFieldSet(blueprint:WorldBlueprintV1,requestedCellSize:number):WorldFieldSet {
+  const site=blueprint.site!,terrain=createSiteTerrain(blueprint.seed,site);
+  const resolution=Math.round(blueprint.width/requestedCellSize)+1,cellSize=blueprint.width/(resolution-1),originX=-blueprint.width/2,originZ=-blueprint.depth/2;
+  const elevation:number[]=[],streamMap:number[]=[],waterMask:number[]=[],waterSurface:number[]=[],waterDepth:number[]=[],slope:number[]=[],moisture:number[]=[];
+  for(let z=0;z<resolution;z++)for(let x=0;x<resolution;x++){
+    const px=originX+x*cellSize,pz=originZ+z*cellSize,height=terrain.height(px,pz),flow=terrain.flow(px,pz),water=siteWater(site,height,flow);
+    elevation.push(height);streamMap.push(flow);waterMask.push(water.mask);waterSurface.push(water.surface);waterDepth.push(water.mask>0?water.surface-height:0);
+    slope.push(Math.hypot(terrain.height(px+1,pz)-terrain.height(px-1,pz),terrain.height(px,pz+1)-terrain.height(px,pz-1))/2);
+    moisture.push(Math.min(1,site.intent.forest*.7+Math.max(0,flow)*.3));
+  }
+  const zeros=()=>new Array(elevation.length).fill(0),drainage=buildDrainage(elevation,resolution,cellSize,originX,originZ);
+  const momentumX=zeros(),momentumZ=zeros(),hydrology={...drainage,streamMap,momentumX,momentumZ};
+  return {preserveBoundary:true,resolution,cellSize,originX,originZ,width:blueprint.width,depth:blueprint.depth,elevation,waterElevation:[...elevation],waterMask,waterSurface,waterDepth,
+    filledElevation:drainage.filledHeights,poolDepth:waterDepth.map((depth,i)=>elevation[i]<site.seaLevel-site.datum?depth:0),streamMap,momentumX,momentumZ,
+    soilDepth:slope.map(s=>Math.max(.04,.7-s)),screeDepth:zeros(),bedrockExposure:slope.map(s=>Math.min(1,s)),saturation:waterMask.map(m=>Math.max(0,Math.min(1,m))),
+    flowDirection:drainage.flowDirection,accumulation:drainage.accumulation,slope,curvature:zeros(),moisture,sediment:zeros(),aeolianSediment:zeros(),windPath:zeros(),abrasion:zeros(),hydrology};
+}
+
+export function sampleWorldField(field: WorldFieldSet, layer: "elevation" | "waterElevation" | "waterMask" | "waterSurface" | "waterDepth" | "filledElevation" | "poolDepth" | "streamMap" | "momentumX" | "momentumZ" | "soilDepth" | "screeDepth" | "bedrockExposure" | "saturation" | "accumulation" | "slope" | "curvature" | "moisture" | "sediment" | "aeolianSediment" | "windPath" | "abrasion", x: number, z: number): number {
   const values = field[layer];
   const gx = clamp((x - field.originX) / field.cellSize, 0, field.resolution - 1), gz = clamp((z - field.originZ) / field.cellSize, 0, field.resolution - 1);
   const x0 = Math.floor(gx), z0 = Math.floor(gz), x1 = Math.min(field.resolution - 1, x0 + 1), z1 = Math.min(field.resolution - 1, z0 + 1), tx = gx - x0, tz = gz - z0;
@@ -453,7 +883,10 @@ export function gradeWorldFieldRoads(field: WorldFieldSet, roads: readonly RoadS
     const index = z * field.resolution + x, worldX = field.originX + x * field.cellSize, worldZ = field.originZ + z * field.cellSize;
     let nearest: RoadSegment | undefined, distance = Number.POSITIVE_INFINITY;
     for (const road of roads) { const next = distanceToSegment(worldX, worldZ, road.ax, road.az, road.bx, road.bz); if (next < distance) { distance = next; nearest = road; } }
-    if (!nearest || nearest.bridge || distance > nearest.width * 1.8) continue;
+    // Water owns its channel. A road crossing it is represented by a bridge;
+    // flattening the river bed up to the road is what previously made water
+    // appear to clip through or hover above the land.
+    if (!nearest || nearest.bridge || field.waterMask[index] > 0 || field.poolDepth[index] > .035 || distance > nearest.width * 1.8) continue;
     const dx = nearest.bx - nearest.ax, dz = nearest.bz - nearest.az, denominator = dx * dx + dz * dz;
     const t = denominator > .001 ? clamp(((worldX - nearest.ax) * dx + (worldZ - nearest.az) * dz) / denominator, 0, 1) : 0;
     const start = sampleWorldField(field, "elevation", nearest.ax, nearest.az), end = sampleWorldField(field, "elevation", nearest.bx, nearest.bz);
@@ -462,10 +895,11 @@ export function gradeWorldFieldRoads(field: WorldFieldSet, roads: readonly RoadS
     const shoulderRadius = Math.max(.75, nearest.width * .9);
     // The carriageway is authoritative and exactly follows the spline grade.
     // A smooth shoulder then transitions back to untouched terrain.
-    if (distance <= roadRadius) elevation[index] = grade;
+    const edge=field.preserveBoundary?smoother(clamp(Math.min(x,z,field.resolution-1-x,field.resolution-1-z)*field.cellSize/8,0,1)):1;
+    if (distance <= roadRadius) elevation[index] += (grade-elevation[index])*edge;
     else {
       const blend = 1 - smoother(clamp((distance - roadRadius) / shoulderRadius, 0, 1));
-      elevation[index] += (grade - elevation[index]) * blend;
+      elevation[index] += (grade - elevation[index]) * blend * edge;
     }
   }
   return { ...field, elevation };
@@ -538,41 +972,70 @@ export function simplifyPolyline(points: readonly SplinePoint[], tolerance: numb
 export function buildAnisotropicRoadNetwork(blueprint: WorldBlueprintV1, rivers: RiverSegment[] = [], cellSize = 2, field?: WorldFieldSet): RoadSegment[] {
   const direct = buildZoneRoadGraph(blueprint.zones);
   if (blueprint.kind === "interior" || blueprint.kind === "dungeon") return direct;
+  cellSize = Math.max(blueprint.width >= 256 ? 4 : 2, cellSize);
   const resolutionX = Math.round(blueprint.width / cellSize) + 1, resolutionZ = Math.round(blueprint.depth / cellSize) + 1;
   const originX = -blueprint.width / 2, originZ = -blueprint.depth / 2;
   const base: WorldTerrainGeometry = { kind: "terrain", seed: blueprint.seed, originX, originZ, size: blueprint.width, baseHeight: blueprint.terrain.baseHeight, relief: blueprint.terrain.relief, roughness: blueprint.terrain.roughness, erosion: blueprint.terrain.erosion, biomeId: blueprint.biome.id, waterLevel: blueprint.terrain.waterLevel, paths: [], rivers };
   const indexAt = (x: number, z: number) => Math.max(0, Math.min(resolutionZ - 1, Math.round((z - originZ) / cellSize))) * resolutionX + Math.max(0, Math.min(resolutionX - 1, Math.round((x - originX) / cellSize)));
   const pointAt = (index: number) => ({ x: originX + (index % resolutionX) * cellSize, z: originZ + Math.floor(index / resolutionX) * cellSize });
-  const neighbors = (index: number) => {
-    const x = index % resolutionX, z = Math.floor(index / resolutionX), result: number[] = [];
-    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if ((dx || dz) && x + dx >= 0 && z + dz >= 0 && x + dx < resolutionX && z + dz < resolutionZ) result.push((z + dz) * resolutionX + x + dx);
-    return result;
-  };
+  const directions = [[1,0],[2,1],[1,1],[1,2],[0,1],[-1,2],[-1,1],[-2,1],[-1,0],[-2,-1],[-1,-1],[-1,-2],[0,-1],[1,-2],[1,-1],[2,-1]];
+  const sampleHeight = (x: number,z: number) => field ? sampleWorldField(field,"elevation",x,z) : sampleTerrainHeight(base,x,z);
+  const heights=Array.from({length:resolutionX*resolutionZ},(_,i)=>{const p=pointAt(i);return sampleHeight(p.x,p.z);});
+  const wet=(x:number,z:number,y:number)=>Boolean(field && sampleWorldField(field,"waterMask",x,z)>0)||(blueprint.terrain.waterLevel!==undefined && y<blueprint.terrain.waterLevel+.08)||rivers.some(r=>distanceToSegment(x,z,r.ax,r.az,r.bx,r.bz)<r.width);
+  const banks=heights.map((_,index)=>{
+    const p=pointAt(index);let clearance=Infinity,tx=0,tz=0;
+    for(const river of rivers){const d=distanceToSegment(p.x,p.z,river.ax,river.az,river.bx,river.bz)-river.width;if(d<clearance){clearance=d;tx=river.bx-river.ax;tz=river.bz-river.az;}}
+    if(field){
+      const mx=sampleWorldField(field,"momentumX",p.x,p.z),mz=sampleWorldField(field,"momentumZ",p.x,p.z);
+      if(Math.hypot(mx,mz)>.01){tx=mx;tz=mz;}
+      // Lakes and minor channels also need a dry shoulder, even when they
+      // were too small to be extracted as a regional river polyline.
+      for(const [dx,dz] of [[0,0],[4,0],[-4,0],[0,4],[0,-4]])if(sampleWorldField(field,"waterMask",p.x+dx,p.z+dz)>0)clearance=Math.min(clearance,Math.hypot(dx,dz));
+    }
+    const length=Math.hypot(tx,tz);return {influence:1-smoother(clamp(clearance/7,0,1)),tx:length?tx/length:0,tz:length?tz/length:0};
+  });
+  const edgeCosts = new Float32Array(resolutionX*resolutionZ*16).fill(-1);
   const output: RoadSegment[] = [];
   for (const edge of direct) {
-    const sampleHeight = (x: number, z: number) => field ? sampleWorldField(field, "elevation", x, z) : sampleTerrainHeight(base, x, z);
-    const start = indexAt(edge.ax, edge.az), goal = indexAt(edge.bx, edge.bz), open = new MinHeap<number>();
-    const cost = new Map<number, number>([[start, 0]]), previous = new Map<number, number>(); open.push(0, start);
-    while (open.size) {
-      const current = open.pop()!; if (current === goal) break;
-      const a = pointAt(current), ah = sampleHeight(a.x, a.z);
-      for (const next of neighbors(current)) {
-        const b = pointAt(next), bh = sampleHeight(b.x, b.z), distance = Math.hypot(b.x - a.x, b.z - a.z);
-        const slope = Math.abs(bh - ah) / distance;
-        const inWater = (blueprint.terrain.waterLevel !== undefined && Math.min(ah, bh) < blueprint.terrain.waterLevel + .08) || rivers.some((river) => distanceToSegment(b.x, b.z, river.ax, river.az, river.bx, river.bz) < river.width);
-        const rough = terrainNoise(b.x * 1.7, b.z * 1.7, blueprint.seed + 7103, .52);
-        const nextCost = (cost.get(current) ?? Number.POSITIVE_INFINITY) + distance * (1 + 18 * slope ** 2 + (inWater ? 7 : 0) + rough * .35);
-        if (nextCost >= (cost.get(next) ?? Number.POSITIVE_INFINITY)) continue;
-        cost.set(next, nextCost); previous.set(next, current);
-        open.push(nextCost + Math.hypot(b.x - edge.bx, b.z - edge.bz), next);
+    const start=indexAt(edge.ax,edge.az),goal=indexAt(edge.bx,edge.bz),initial=start*16;
+    const open=new MinHeap<{state:number;cost:number}>(),cost=new Map<number,number>([[initial,0]]),previous=new Map<number,number>();open.push(0,{state:initial,cost:0});
+    let finish=-1;
+    while(open.size){
+      const current=open.pop()!;if(current.cost!==cost.get(current.state))continue;
+      const index=Math.floor(current.state/16),heading=current.state%16;if(index===goal){finish=current.state;break;}
+      const a=pointAt(index),cx=index%resolutionX,cz=Math.floor(index/resolutionX),ah=heights[index];
+      for(let direction=0;direction<16;direction++){
+        const [dx,dz]=directions[direction],nx=cx+dx,nz=cz+dz;if(nx<0||nz<0||nx>=resolutionX||nz>=resolutionZ)continue;
+        const next=nz*resolutionX+nx,b=pointAt(next),bh=heights[next],distance=Math.hypot(dx,dz)*cellSize;
+        const edgeIndex=index*16+direction;
+        let routeCost=edgeCosts[edgeIndex];
+        if(routeCost<0) {
+        const midHeight=sampleHeight((a.x+b.x)/2,(a.z+b.z)/2);
+        const grade=Math.max(Math.abs(bh-ah)/distance,Math.abs(midHeight-ah)/(distance/2),Math.abs(bh-midHeight)/(distance/2));
+        const water=(Number(wet(a.x,a.z,ah))+Number(wet(b.x,b.z,bh))+Number(wet((a.x+b.x)/2,(a.z+b.z)/2,midHeight)))/3;
+        const bank=banks[index],nextBank=banks[next],directionLength=Math.hypot(dx,dz);
+        const parallel=Math.max(Math.abs((bank.tx*dx+bank.tz*dz)/directionLength),Math.abs((nextBank.tx*dx+nextBank.tz*dz)/directionLength));
+        const riparian=Math.max(bank.influence,nextBank.influence);
+        routeCost=distance*(1+24*grade*grade+water*(35+parallel**4*100)+riparian*(4+parallel**4*22));edgeCosts[edgeIndex]=routeCost;
+        }
+        const [px,pz]=directions[heading],turn=index===start?0:1-(px*dx+pz*dz)/(Math.hypot(px,pz)*Math.hypot(dx,dz));
+        const nextState=next*16+direction,nextCost=current.cost+routeCost+distance*turn*2.8;
+        if(nextCost>=(cost.get(nextState)??Infinity))continue;
+        cost.set(nextState,nextCost);previous.set(nextState,current.state);open.push(nextCost+Math.hypot(b.x-edge.bx,b.z-edge.bz),{state:nextState,cost:nextCost});
       }
     }
-    const path: number[] = [goal];
-    while (path[0] !== start && previous.has(path[0])) path.unshift(previous.get(path[0])!);
-    if (path[0] !== start) { output.push(edge); continue; }
-    const gridPath = path.map(pointAt);
-    const controls = cornerCutPolyline(simplifyPolyline(gridPath, cellSize * 1.15), 3);
-    const curve = sampleCatmullRomSpline(controls, 4);
+    if(finish<0){output.push(edge);continue;}
+    const path:number[]=[];for(let state=finish;;state=previous.get(state)!){path.push(Math.floor(state/16));if(state===initial)break;}path.reverse();
+    const gridPath=path.map(pointAt);gridPath[0]={x:edge.ax,z:edge.az};gridPath[gridPath.length-1]={x:edge.bx,z:edge.bz};
+    const controls=cornerCutPolyline(simplifyPolyline(gridPath,cellSize*.45),2);
+    let curve=sampleCatmullRomSpline(controls,4);
+    curve[0]=gridPath[0];curve[curve.length-1]=gridPath[gridPath.length-1];
+    // Smoothing must stay inside the searched corridor and must not introduce
+    // a water crossing that the route search had avoided.
+    const corridorSafe=curve.every(p=>gridPath.some((a,i)=>i>0&&distanceToSegment(p.x,p.z,gridPath[i-1].x,gridPath[i-1].z,a.x,a.z)<cellSize*1.5));
+    const gridWet=gridPath.some(p=>wet(p.x,p.z,sampleHeight(p.x,p.z)));
+    const wetLength=(points:Array<{x:number;z:number}>)=>points.reduce((sum,b,i)=>{if(!i)return sum;const a=points[i-1],x=(a.x+b.x)/2,z=(a.z+b.z)/2;return sum+(wet(x,z,sampleHeight(x,z))?Math.hypot(b.x-a.x,b.z-a.z):0);},0);
+    if(!corridorSafe || (!gridWet&&curve.some(p=>wet(p.x,p.z,sampleHeight(p.x,p.z)))) || wetLength(curve)>wetLength(gridPath)+cellSize*.5)curve=gridPath;
     const sampled = [curve[0]];
     for (let index = 0; index < curve.length - 1; index++) {
       const a = curve[index], b = curve[index + 1], spans = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 1.5));
@@ -581,8 +1044,7 @@ export function buildAnisotropicRoadNetwork(blueprint: WorldBlueprintV1, rivers:
     for (let index = 0; index < sampled.length - 1; index++) {
       const a = sampled[index], b = sampled[index + 1];
       const midpointX = (a.x + b.x) / 2, midpointZ = (a.z + b.z) / 2;
-      const bridge = rivers.some((river) => distanceToSegment(midpointX, midpointZ, river.ax, river.az, river.bx, river.bz) < river.width)
-        || (blueprint.terrain.waterLevel !== undefined && sampleHeight(midpointX, midpointZ) < blueprint.terrain.waterLevel + .08);
+      const bridge = wet(midpointX,midpointZ,sampleHeight(midpointX,midpointZ));
       output.push({ ...edge, ax: a.x, az: a.z, bx: b.x, bz: b.z, bridge });
     }
   }
@@ -713,17 +1175,24 @@ export function traceDownhillFlow(geometry: WorldTerrainGeometry, startX: number
 }
 
 export function terrainGeometryForChunk(blueprint: WorldBlueprintV1, originX: number, originZ: number, paths = buildZoneRoadGraph(blueprint.zones), rivers: RiverSegment[] = [], field?: WorldFieldSet): WorldTerrainGeometry {
-  const geometry: WorldTerrainGeometry = { kind: "terrain", seed: blueprint.seed, originX, originZ, size: blueprint.chunkSize, baseHeight: blueprint.terrain.baseHeight, relief: blueprint.kind === "interior" || blueprint.kind === "dungeon" ? 0 : blueprint.terrain.relief, roughness: blueprint.terrain.roughness, erosion: blueprint.terrain.erosion, biomeId: blueprint.biome.id, waterLevel: blueprint.terrain.waterLevel, paths, rivers };
+  const geometry: WorldTerrainGeometry = { worldSite:blueprint.site, kind: "terrain", seed: blueprint.seed, originX, originZ, size: blueprint.chunkSize, baseHeight: blueprint.terrain.baseHeight, relief: blueprint.kind === "interior" || blueprint.kind === "dungeon" ? 0 : blueprint.terrain.relief, roughness: blueprint.terrain.roughness, erosion: blueprint.terrain.erosion, biomeId: blueprint.biome.id, waterLevel: blueprint.terrain.waterLevel, paths, rivers };
   if (field) {
-    const resolution = Math.round(blueprint.chunkSize / field.cellSize) + 1, heights: number[] = [], roadWeights: number[] = [], terraceLevels: number[] = [];
+    const resolution = Math.round(blueprint.chunkSize / field.cellSize) + 1, heights: number[] = [], roadWeights: number[] = [], terraceLevels: number[] = [], soilDepth: number[] = [], screeDepth: number[] = [], bedrockExposure: number[] = [], saturation: number[] = [], aeolianSediment: number[] = [], windPath: number[] = [], abrasion: number[] = [];
     for (let row = 0; row < resolution; row++) for (let column = 0; column < resolution; column++) {
       const x = originX + column * blueprint.chunkSize / (resolution - 1), z = originZ + row * blueprint.chunkSize / (resolution - 1);
       const height = sampleWorldField(field, "elevation", x, z);
       heights.push(height);
-      roadWeights.push(roadSurfaceWeight(geometry, x, z));
+      roadWeights.push(sampleWorldField(field,"waterMask",x,z)>-.08 ? 0 : roadSurfaceWeight(geometry, x, z));
       terraceLevels.push(Math.round(height - geometry.baseHeight));
+      soilDepth.push(sampleWorldField(field, "soilDepth", x, z));
+      screeDepth.push(sampleWorldField(field, "screeDepth", x, z));
+      bedrockExposure.push(sampleWorldField(field, "bedrockExposure", x, z));
+      saturation.push(sampleWorldField(field, "saturation", x, z));
+      aeolianSediment.push(sampleWorldField(field, "aeolianSediment", x, z));
+      windPath.push(sampleWorldField(field, "windPath", x, z));
+      abrasion.push(sampleWorldField(field, "abrasion", x, z));
     }
-    geometry.heightfield = { resolution, heights, roadWeights, terraceLevels };
+    geometry.heightfield = { resolution, heights, roadWeights, terraceLevels, soilDepth, screeDepth, bedrockExposure, saturation, aeolianSediment, windPath, abrasion };
   }
   return geometry;
 }

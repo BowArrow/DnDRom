@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Bot, Dices, Mic, MicOff, Minus, Palette, RotateCcw, Send, Square, Sparkles, Volume2 } from "lucide-react";
 import { narrateRollOutcome, runDungeonMaster } from "../ai/dungeonMaster";
-import { queueSpeech, startBrowserVoiceCapture, speak, stopSpeaking, type VoiceCapture } from "../audio/voice";
+import { queueLocalNarration, stopLocalNarration as stopSpeaking } from "../audio/localNarration";
+import { startLocalSpeechStream, type LocalSpeechStream } from "../audio/localSpeechStream";
 import { performCheck, rollDice } from "../domain/rules";
 import { useCampaignStore } from "../state/campaignStore";
 import { DiceFace } from "./DiceFace";
@@ -36,27 +37,44 @@ export function DungeonMasterPanel({ onNotify, onOpenDiceForge }: DungeonMasterP
   const progressStoryBeat = useCampaignStore((state) => state.progressStoryBeat);
   const [input, setInput] = useState("");
   const [partialVoice, setPartialVoice] = useState("");
+  const [liveNarration, setLiveNarration] = useState("");
+  const speechErrorRef = useRef("");
+  const mountedRef = useRef(true);
+  const voiceStarting = useRef(false);
+  const queueSpeech = (text: string, enabled: boolean) => {
+    const config = useCampaignStore.getState().campaign.settings;
+    queueLocalNarration(text, enabled, { endpoint: config.localTtsEndpoint, voice: config.localTtsVoice, onError: (message) => { if (speechErrorRef.current !== message) { speechErrorRef.current = message; onNotify(message, "warning"); } } });
+  };
+  const speak = (text: string, enabled: boolean) => { stopSpeaking(); queueSpeech(text, enabled); };
   const [listening, setListening] = useState(false);
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
   const [dicePool, setDicePool] = useState<Record<number, number>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const voiceRef = useRef<VoiceCapture | null>(null);
+  const voiceRef = useRef<LocalSpeechStream | null>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, isThinking]);
 
-  useEffect(() => () => {
+  useEffect(() => { mountedRef.current = true; return () => {
+    mountedRef.current = false;
     abortRef.current?.abort();
-    voiceRef.current?.stop();
+    voiceRef.current?.abort();
     stopSpeaking();
+  }; }, []);
+
+  useEffect(() => {
+    const action = (event: Event) => { const detail = (event as CustomEvent<{ action: string }>).detail; if (detail?.action) void submit(detail.action); };
+    window.addEventListener("dndrom:dm-action", action);
+    return () => window.removeEventListener("dndrom:dm-action", action);
   }, []);
 
   const submit = async (provided?: string) => {
     const action = (provided ?? input).trim();
-    if (!action || isThinking) return;
+    if (!action || useCampaignStore.getState().isDmThinking) return;
     setInput("");
+    setLiveNarration("");
     stopSpeaking();
     setPartialVoice("");
     setSuggestedActions([]);
@@ -67,7 +85,12 @@ export function DungeonMasterPanel({ onNotify, onOpenDiceForge }: DungeonMasterP
     abortRef.current = controller;
     try {
       const campaign = useCampaignStore.getState().campaign;
-      const result = await runDungeonMaster(campaign, action, controller.signal, (chunk) => queueSpeech(chunk, settings.speakDmResponses));
+      const result = await runDungeonMaster(campaign, action, controller.signal, (chunk) => {
+        if (controller.signal.aborted) return;
+        setLiveNarration((current) => `${current} ${chunk}`.trim());
+        queueSpeech(chunk, campaign.settings.speakDmResponses);
+      });
+      controller.signal.throwIfAborted();
       if (result.warning) {
         stopSpeaking();
         addMessage({ role: "system", content: result.warning });
@@ -118,8 +141,7 @@ export function DungeonMasterPanel({ onNotify, onOpenDiceForge }: DungeonMasterP
         onNotify(message, "error");
       }
     } finally {
-      abortRef.current = null;
-      setDmThinking(false);
+      if (abortRef.current === controller) { abortRef.current = null; setDmThinking(false); setLiveNarration(""); }
     }
   };
 
@@ -130,33 +152,22 @@ export function DungeonMasterPanel({ onNotify, onOpenDiceForge }: DungeonMasterP
     addMessage({ role: "system", content: "The narration was interrupted. No uncommitted game state was changed." });
   };
 
-  const toggleVoice = () => {
-    if (listening) {
-      voiceRef.current?.stop();
-      voiceRef.current = null;
-      setListening(false);
-      return;
-    }
+  const toggleVoice = async () => {
+    if (voiceStarting.current) return;
+    if (listening) { voiceRef.current?.stop(); voiceRef.current = null; setListening(false); return; }
+    voiceStarting.current = true;
     try {
-      setListening(true);
-      setPartialVoice("");
-      voiceRef.current = startBrowserVoiceCapture(
-        setPartialVoice,
-        (text) => {
-          setListening(false);
-          voiceRef.current = null;
-          setInput(text);
-          void submit(text);
+      const capture = await startLocalSpeechStream(useCampaignStore.getState().campaign.settings.whisperEndpoint, {
+        onPartial: (text) => { if (mountedRef.current) setPartialVoice(text); },
+        onFinal: (text) => { if (mountedRef.current) { setPartialVoice(""); setInput(text); void submit(text); } },
+        onSpeechStart: () => {
+          abortRef.current?.abort(); stopSpeaking(); setDmThinking(false); setLiveNarration("");
         },
-        (message) => {
-          setListening(false);
-          onNotify(message, "error");
-        },
-      );
-    } catch (error) {
-      setListening(false);
-      onNotify(error instanceof Error ? error.message : "Voice capture failed", "warning");
-    }
+        onError: (message) => { if (mountedRef.current) { setListening(false); onNotify(message, "warning"); } },
+      });
+      if (!mountedRef.current) capture.abort(); else { voiceRef.current = capture; setListening(true); }
+    } catch (error) { setListening(false); onNotify(error instanceof Error ? error.message : "Local speak mode failed", "warning"); }
+    finally { voiceStarting.current = false; }
   };
 
   const diceCount = Object.values(dicePool).reduce((sum, count) => sum + count, 0);
@@ -235,13 +246,14 @@ export function DungeonMasterPanel({ onNotify, onOpenDiceForge }: DungeonMasterP
         <button className="roll-dice-button" onClick={rollPool} disabled={!diceCount}><Dices size={16} /><span>Roll {diceCount ? `${diceCount} ${diceCount === 1 ? "die" : "dice"}` : "dice"}</span></button>
       </div>
 
+      {liveNarration && <p className="dm-live-narration" role="status">{liveNarration}</p>}
       <div className={`dm-composer ${listening ? "listening" : ""}`}>
         {partialVoice && <div className="partial-transcript">{partialVoice}</div>}
         <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
         }} placeholder="Describe what your character says or attempts…" rows={3} disabled={isThinking} />
         <div className="composer-actions">
-          <button className={listening ? "recording" : ""} onClick={toggleVoice} title="Speak your action">{listening ? <MicOff size={17} /> : <Mic size={17} />}</button>
+          <button className={listening ? "recording" : ""} onClick={() => void toggleVoice()} aria-label={listening ? "Stop local speak mode" : "Start local speak mode"} title="Local speak mode: pauses send your action; speaking interrupts narration">{listening ? <MicOff size={17} /> : <Mic size={17} />}</button>
           {isThinking ? <button className="interrupt-button" onClick={interrupt}><Square size={15} /> Interrupt</button> : <button className="send-button" onClick={() => submit()} disabled={!input.trim()}><Send size={16} /> Send</button>}
         </div>
       </div>

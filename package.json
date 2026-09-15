@@ -1,6 +1,6 @@
 {
   "name": "dndrom",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "A local-first 3D tabletop with an AI Dungeon Master",
   "license": "MIT",
@@ -17,6 +17,12 @@
     "desktop:package": "pnpm --filter @dndrom/desktop tauri build",
     "desktop:build": "pnpm desktop:package && pnpm smoke:packaged",
     "smoke:packaged": "node scripts/smoke-packaged.mjs",
-    "signaling": "pnpm --filter @dndrom/signaling start"
+    "signaling": "pnpm --filter @dndrom/signaling start",
+    "unreal": "node scripts/unreal.mjs",
+    "unreal:export": "node scripts/export-unreal-scene.mjs",
+    "smoke:unreal": "node scripts/smoke-unreal.mjs",
+    "smoke:unreal-app": "node scripts/smoke-native-app.mjs",
+    "unreal:installer": "node scripts/unreal-installer.mjs",
+    "runtime:host": "cargo run -p dndrom-runtime-host --"
   }
 }

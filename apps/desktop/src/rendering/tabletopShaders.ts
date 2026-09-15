@@ -233,7 +233,7 @@ const createWaterEnvironmentProbe = (device: pc.GraphicsDevice): pc.Texture => {
 };
 
 /** Shared river/lake material: three Gerstner waves, dual-scrolling normals,
- * depth-buffer Beer attenuation, screen refraction, environment reflection,
+ * depth-buffer Beer attenuation, environment reflection,
  * downstream advection, and bank-distance foam. */
 export const createFlowingWaterMaterial = (device: pc.GraphicsDevice): pc.ShaderMaterial => {
   const material = shader("world-flowing-water", `
@@ -261,7 +261,10 @@ void main(void) {
   float phaseA = 1.9 * (dot(flow, world.xz) - uTime * 1.15);
   float phaseB = 3.1 * (dot(across, world.xz) - uTime * .48);
   float phaseC = 4.7 * (dot(diagonal, world.xz) - uTime * .31);
-  float amplitudeA = .055, amplitudeB = .024, amplitudeC = .012;
+  // The generated channel bed guarantees roughly 6.5 cm clearance. Keep the
+  // combined displacement below that clearance so troughs never expose the
+  // terrain as holes through a stream or lake.
+  float amplitudeA = .021, amplitudeB = .009, amplitudeC = .004;
   float steepA = .34, steepB = .2, steepC = .14;
   world.xz += edgeGate * (flow * steepA * amplitudeA * cos(phaseA) + across * steepB * amplitudeB * cos(phaseB) + diagonal * steepC * amplitudeC * cos(phaseC));
   world.y += edgeGate * (amplitudeA * sin(phaseA) + amplitudeB * sin(phaseB) + amplitudeC * sin(phaseC));
@@ -282,8 +285,8 @@ uniform vec3 uShallowColor;
 uniform vec3 uDeepColor;
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
-uniform sampler2D uSceneColorMap;
 uniform sampler2D uSceneDepthMap;
+uniform sampler2D uSceneColorMap;
 uniform sampler2D uWaterNormal;
 uniform samplerCube uWaterEnvironment;
 varying vec3 vWorldPos;
@@ -303,34 +306,42 @@ void main(void) {
   vec3 normalDetail = normalize(vec3(cos(phaseA) * .032 + sin(phaseB) * .012, 1.0, sin(phaseA * .81) * .026 + cos(phaseB) * .01));
   vec3 normalA = texture2D(uWaterNormal, vWorldPos.xz * .075 + vFlow * uTime * .018).xyz * 2.0 - 1.0;
   vec3 normalB = texture2D(uWaterNormal, vWorldPos.xz * .123 + across * uTime * -.011).xyz * 2.0 - 1.0;
-  vec3 scrollingNormal = normalize(vec3(normalA.x + normalB.y, 2.15, normalA.y - normalB.x));
-  vec3 N = normalize(mix(mix(vNormal, normalDetail, .38), scrollingNormal, .32));
+  // Fine normals break up the highlight without replacing the broad surface
+  // normal. Letting the normal tile dominate makes water read as white foil.
+  vec3 scrollingNormal = normalize(vec3((normalA.x + normalB.y) * .28, 4.2, (normalA.y - normalB.x) * .28));
+  vec3 N = normalize(mix(mix(vNormal, normalDetail, .16), scrollingNormal, .1));
   vec3 V = normalize(view_position - vWorldPos);
   vec3 L = normalize(-uSunDirection);
   vec3 H = normalize(V + L);
-  float fresnel = .025 + .78 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+  float fresnel = .02 + .56 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
   float current = .5 + .5 * sin(phaseA * .55 + phaseB * .21);
   float currentBand = .5 + .5 * sin(phaseA + sin(phaseB) * .24);
   vec2 screenUv = vClipPosition.xy / max(.0001, vClipPosition.w) * .5 + .5;
   float sceneDepth = texture2D(uSceneDepthMap, screenUv).r;
   float screenDepthDelta = clamp(abs(sceneDepth - gl_FragCoord.z) * 36.0, 0.0, 2.0);
   float opticalDepth = max(vDepth, screenDepthDelta);
-  vec3 absorption = exp(-vec3(.88, .24, .12) * opticalDepth);
+  vec2 refractionOffset = (normalA.xz + normalB.zx) * .0035 * smoothstep(.04, .8, opticalDepth) * (1.0 - vEdge * .72);
+  vec3 refractedScene = texture2D(uSceneColorMap, clamp(screenUv + refractionOffset, vec2(.002), vec2(.998))).rgb;
+  vec3 absorption = exp(-vec3(1.28, .42, .2) * opticalDepth);
   vec3 body = mix(uDeepColor, uShallowColor, clamp(exp(-opticalDepth * .78) + current * .06, 0.0, 1.0));
-  vec2 refractedUv = clamp(screenUv + N.xz * (.006 + .006 * clamp(opticalDepth, 0.0, 1.0)), vec2(.002), vec2(.998));
-  vec3 refractedScene = texture2D(uSceneColorMap, refractedUv).rgb * absorption;
   float daylight = .62 + max(dot(N, L), 0.0) * .38;
   vec3 reflectedSky = textureCube(uWaterEnvironment, reflect(-V, N)).rgb;
-  vec3 transmitted = mix(refractedScene, body, clamp(.22 + opticalDepth * .23, .22, .72));
-  vec3 reflected = reflectedSky * .58 + body * .42;
+  vec3 transmitted = body * mix(vec3(.72), absorption, .18);
+  vec3 reflected = reflectedSky * .065 + body * .935;
   vec3 color = mix(transmitted, reflected, fresnel) * daylight + vec3(.003, .022, .03) * currentBand;
-  color += uSunColor * pow(max(dot(N, H), 0.0), 96.0) * .32;
-  float foamNoise = .72 + .28 * sin(along * 2.9 - uTime * 2.2 + hash(floor(vWorldPos.xz * 1.2)) * 6.283);
-  float foam = smoothstep(.5, .91, vEdge * foamNoise);
+  // Refraction is a detail, not the base color. Letting the captured terrain
+  // dominate made green banks plus the scene grade read as opaque lavender.
+  color = mix(refractedScene * mix(vec3(.72, .86, .84), body, .28), color, .88);
+  color = mix(color, body * (.72 + daylight * .28), .34);
+  color += uSunColor * pow(max(dot(N, H), 0.0), 128.0) * .12;
+  float foamNoise = .5 + .5 * sin(along * 2.35 - uTime * 2.2 + sin(crossFlow * .42) + hash(floor(vWorldPos.xz * 1.2)) * 2.4);
+  float shoreBand = smoothstep(.72, .985, vEdge);
+  float breaker = smoothstep(.42, .82, foamNoise);
+  float foam = shoreBand * (.3 + breaker * .7);
   foam *= .72 + max(dot(N, L), 0.0) * .28;
-  color = mix(color, vec3(.78, .9, .82), foam * ${WORLD_VISUAL_CONFIG.water.foamStrength.toFixed(2)});
+  color = mix(color, vec3(.68, .78, .73), foam * ${WORLD_VISUAL_CONFIG.water.foamStrength.toFixed(2)});
   float alpha = mix(${WORLD_VISUAL_CONFIG.water.deepAlpha.toFixed(2)}, ${WORLD_VISUAL_CONFIG.water.shallowAlpha.toFixed(2)}, clamp(exp(-opticalDepth * .72), 0.0, 1.0));
-  alpha = clamp(alpha + fresnel * .12 + foam * .18, .42, .94);
+  alpha = clamp(alpha + fresnel * .1 + foam * .12, .52, .91);
   gl_FragColor = vec4(color, alpha);
 }`, { aPosition: pc.SEMANTIC_POSITION, aNormal: pc.SEMANTIC_NORMAL, aUv0: pc.SEMANTIC_TEXCOORD0, aColor: pc.SEMANTIC_COLOR });
   material.blendType = pc.BLEND_NORMAL;
@@ -347,90 +358,188 @@ void main(void) {
   return material;
 };
 
-/** Chunk-batched tapered grass. UV.y is the bend weight; vertex alpha is a
- * stable per-blade phase so adjacent blades do not sway in lockstep. */
-export const createWindGrassMaterial = (base: [number, number, number]): pc.ShaderMaterial => {
-  const material = shader("world-wind-grass", `
-attribute vec3 aPosition;
-attribute vec3 aNormal;
-attribute vec2 aUv0;
-attribute vec4 aColor;
-attribute vec4 instance_line1;
-attribute vec4 instance_line2;
-attribute vec4 instance_line3;
-attribute vec4 instance_line4;
-uniform mat4 matrix_model;
-uniform mat4 matrix_viewProjection;
+/** Chunk-batched tapered grass using StandardMaterial's forward and shadow
+ * passes. Only the vertex transform is replaced: roots remain fixed, tips
+ * bend, and the identical deformation is used while rendering shadow maps. */
+export const createWindGrassMaterial = (base: [number, number, number]): pc.StandardMaterial => {
+  const material = new pc.StandardMaterial();
+  material.name = "world-wind-grass-pbr";
+  material.diffuse = new pc.Color(base[0], base[1], base[2]);
+  material.diffuseVertexColor = true;
+  material.useLighting = true;
+  material.useSkybox = true;
+  material.useMetalness = true;
+  material.metalness = 0;
+  material.gloss = .035;
+  material.specularityFactor = .08;
+  material.clearCoat = 0;
+  material.cull = pc.CULLFACE_NONE;
+  material.twoSidedLighting = true;
+  material.alphaToCoverage = true;
+  material.shaderChunksVersion = "2.21";
+  material.getShaderChunks(pc.SHADERLANGUAGE_GLSL).set("transformVS", `
+#ifdef PIXELSNAP
+uniform vec4 uScreenSize;
+#endif
+#ifdef SCREENSPACE
+uniform float projectionFlipY;
+#endif
 uniform float uTime;
+uniform vec2 uWorldWind;
 uniform vec3 uPlayerPosition;
 uniform float uBendRadius;
 uniform float uBendStrength;
-varying vec3 vColor;
-varying float vTip;
-varying vec3 vNormal;
-varying vec3 vWorldPos;
-void main(void) {
-  mat4 instanceMatrix = mat4(instance_line1, instance_line2, instance_line3, instance_line4);
-  mat4 worldMatrix = matrix_model * instanceMatrix;
-  vec4 world = worldMatrix * vec4(aPosition, 1.0);
-  float weight = aUv0.y * aUv0.y;
-  float phase = aColor.a * 6.2831853;
-  float gust = sin(uTime * 1.45 + world.x * .19 + world.z * .13 + phase);
-  float detail = sin(uTime * 3.8 + world.x * .71 - world.z * .53 + phase * 1.7);
-  world.x += (gust * .22 + detail * .055) * weight;
-  world.z += (gust * .13 - detail * .04) * weight;
+uniform vec3 uGrassViewPosition;
+vec4 evalWorldPosition(vec3 vertexPosition, mat4 modelMatrix) {
+  vec3 localPos = getLocalPosition(vertexPosition);
+  float rootLocked = smoothstep(.025, .28, localPos.y);
+  float weight = rootLocked * rootLocked;
+  vec4 unbentWorld = modelMatrix * vec4(localPos, 1.0);
+  float phase = fract(sin(dot(unbentWorld.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+  float gustEnvelope = .55 + .45 * sin(uTime * .31 + unbentWorld.x * .027 - unbentWorld.z * .019);
+  float gust = sin(uTime * 1.45 + unbentWorld.x * .19 + unbentWorld.z * .13 + phase) * gustEnvelope;
+  float detail = sin(uTime * 3.8 + unbentWorld.x * .71 - unbentWorld.z * .53 + phase * 1.7);
+  localPos.x += (gust * .16 + detail * .035) * weight * uWorldWind.x;
+  localPos.z += (gust * .09 - detail * .025) * weight * uWorldWind.y;
+  vec4 world = modelMatrix * vec4(localPos, 1.0);
   vec2 away = world.xz - uPlayerPosition.xz;
   float playerDistance = length(away);
   float interaction = 1.0 - smoothstep(0.0, uBendRadius, playerDistance);
   away = playerDistance > .001 ? away / playerDistance : vec2(1.0, 0.0);
-  world.xz += away * interaction * uBendStrength * weight;
-  world.y -= interaction * uBendStrength * .42 * weight;
-  vColor = aColor.rgb;
-  vTip = aUv0.y;
-  vNormal = normalize(mat3(worldMatrix) * aNormal);
-  vWorldPos = world.xyz;
-  gl_Position = matrix_viewProjection * world;
-}`, `
-precision highp float;
-varying vec3 vColor;
-varying float vTip;
-varying vec3 vNormal;
-varying vec3 vWorldPos;
-uniform vec3 uBaseColor;
-void main(void) {
-  vec3 sun = normalize(vec3(-.35, .84, -.4));
-  float direct = max(dot(normalize(vNormal), sun), 0.0);
-  float subsurface = max(dot(normalize(vNormal), -sun), 0.0) * .18;
-  float light = .42 + direct * .58 + subsurface + vTip * .12;
-  float bladeVariation = .92 + .08 * sin(vWorldPos.x * 2.3 + vWorldPos.z * 1.7);
-  vec3 color = mix(uBaseColor * .62, vColor, .72) * light * bladeVariation;
-  gl_FragColor = vec4(color, 1.0);
-}`, { aPosition: pc.SEMANTIC_POSITION, aNormal: pc.SEMANTIC_NORMAL, aUv0: pc.SEMANTIC_TEXCOORD0, aColor: pc.SEMANTIC_COLOR, instance_line1: pc.SEMANTIC_ATTR11, instance_line2: pc.SEMANTIC_ATTR12, instance_line3: pc.SEMANTIC_ATTR14, instance_line4: pc.SEMANTIC_ATTR15 });
-  material.blendType = pc.BLEND_NONE;
-  material.depthWrite = true;
-  material.cull = pc.CULLFACE_NONE;
+  localPos.xz += away * interaction * uBendStrength * weight;
+  localPos.y -= interaction * uBendStrength * .32 * weight;
+  localPos.y *= 1.0 - smoothstep(35.0, 70.0, length(unbentWorld.xyz - uGrassViewPosition));
+  return modelMatrix * vec4(localPos, 1.0);
+}
+vec4 getPosition() {
+  dModelMatrix = getModelMatrix();
+  vec4 posW = evalWorldPosition(vertex_position.xyz, dModelMatrix);
+  dPositionW = posW.xyz;
+  vec4 screenPos;
+  #ifdef UV1LAYOUT
+    screenPos = vec4(vertex_texCoord1.xy * 2.0 - 1.0, 0.5, 1.0);
+    #ifdef WEBGPU
+      screenPos.y *= -1.0;
+    #endif
+  #else
+    #ifdef SCREENSPACE
+      screenPos = posW;
+      screenPos.y *= projectionFlipY;
+    #else
+      screenPos = matrix_viewProjection * posW;
+    #endif
+    #ifdef PIXELSNAP
+      screenPos.xy = (screenPos.xy * 0.5) + 0.5;
+      screenPos.xy *= uScreenSize.xy;
+      screenPos.xy = floor(screenPos.xy);
+      screenPos.xy *= uScreenSize.zw;
+      screenPos.xy = (screenPos.xy * 2.0) - 1.0;
+    #endif
+  #endif
+  return screenPos;
+}
+vec3 getWorldPosition() { return dPositionW; }
+`);
+  material.getShaderChunks(pc.SHADERLANGUAGE_WGSL).set("transformVS", `
+#ifdef PIXELSNAP
+  uniform uScreenSize: vec4f;
+#endif
+#ifdef SCREENSPACE
+  uniform projectionFlipY: f32;
+#endif
+uniform uTime: f32;
+uniform uWorldWind: vec2f;
+uniform uPlayerPosition: vec3f;
+uniform uBendRadius: f32;
+uniform uBendStrength: f32;
+uniform uGrassViewPosition: vec3f;
+fn evalWorldPosition(vertexPosition: vec3f, modelMatrix: mat4x4f) -> vec4f {
+  var localPos: vec3f = getLocalPosition(vertexPosition);
+  let rootLocked: f32 = smoothstep(.025, .28, localPos.y);
+  let weight: f32 = rootLocked * rootLocked;
+  let unbentWorld: vec4f = modelMatrix * vec4f(localPos, 1.0);
+  let phase: f32 = fract(sin(dot(unbentWorld.xz, vec2f(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+  let gustEnvelope: f32 = .55 + .45 * sin(uniform.uTime * .31 + unbentWorld.x * .027 - unbentWorld.z * .019);
+  let gust: f32 = sin(uniform.uTime * 1.45 + unbentWorld.x * .19 + unbentWorld.z * .13 + phase) * gustEnvelope;
+  let detail: f32 = sin(uniform.uTime * 3.8 + unbentWorld.x * .71 - unbentWorld.z * .53 + phase * 1.7);
+  localPos.x += (gust * .16 + detail * .035) * weight * uniform.uWorldWind.x;
+  localPos.z += (gust * .09 - detail * .025) * weight * uniform.uWorldWind.y;
+  var world: vec4f = modelMatrix * vec4f(localPos, 1.0);
+  var away: vec2f = world.xz - uniform.uPlayerPosition.xz;
+  let playerDistance: f32 = length(away);
+  let interaction: f32 = 1.0 - smoothstep(0.0, uniform.uBendRadius, playerDistance);
+  away = select(vec2f(1.0, 0.0), away / playerDistance, playerDistance > .001);
+  let playerBend: vec2f = away * interaction * uniform.uBendStrength * weight;
+  localPos.x += playerBend.x;
+  localPos.z += playerBend.y;
+  localPos.y -= interaction * uniform.uBendStrength * .32 * weight;
+  localPos.y *= 1.0 - smoothstep(35.0, 70.0, length(unbentWorld.xyz - uniform.uGrassViewPosition));
+  return modelMatrix * vec4f(localPos, 1.0);
+}
+fn getPosition() -> vec4f {
+  dModelMatrix = getModelMatrix();
+  let posW: vec4f = evalWorldPosition(vertex_position.xyz, dModelMatrix);
+  dPositionW = posW.xyz;
+  var screenPos: vec4f;
+  #ifdef UV1LAYOUT
+    screenPos = vec4f(vertex_texCoord1.xy * 2.0 - 1.0, 0.5, 1.0);
+    screenPos.y *= -1.0;
+  #else
+    #ifdef SCREENSPACE
+      screenPos = posW;
+      screenPos.y *= uniform.projectionFlipY;
+    #else
+      screenPos = uniform.matrix_viewProjection * posW;
+    #endif
+    #ifdef PIXELSNAP
+      screenPos.xy = (screenPos.xy * 0.5) + 0.5;
+      screenPos.xy *= uniform.uScreenSize.xy;
+      screenPos.xy = floor(screenPos.xy);
+      screenPos.xy *= uniform.uScreenSize.zw;
+      screenPos.xy = (screenPos.xy * 2.0) - 1.0;
+    #endif
+  #endif
+  return screenPos;
+}
+fn getWorldPosition() -> vec3f { return dPositionW; }
+`);
   material.setParameter("uTime", 0);
-  material.setParameter("uBaseColor", base);
+  material.setParameter("uWorldWind", [1,1]);
   material.setParameter("uPlayerPosition", [100000, 100000, 100000]);
   material.setParameter("uBendRadius", 1.35);
   material.setParameter("uBendStrength", .7);
+  material.setParameter("uGrassViewPosition", [0,0,0]);
   material.update();
   return material;
 };
 
-interface TerrainLayerTextures { grass: pc.Texture; dirt: pc.Texture; rock: pc.Texture; snow: pc.Texture; road: pc.Texture }
+interface TerrainLayerTextures {
+  grass: pc.Texture;
+  dirt: pc.Texture;
+  sand: pc.Texture;
+  rock: pc.Texture;
+  snow: pc.Texture;
+  road: pc.Texture;
+  grassNormal: pc.Texture;
+  dirtNormal: pc.Texture;
+  sandNormal: pc.Texture;
+  rockNormal: pc.Texture;
+  snowNormal: pc.Texture;
+  roadNormal: pc.Texture;
+  normalAtlas: pc.Texture;
+}
 const terrainLayerCache = new WeakMap<pc.GraphicsDevice, TerrainLayerTextures>();
 
 const createTerrainLayerTextures = (device: pc.GraphicsDevice): TerrainLayerTextures => {
   const size = 128;
+  const hash = (x: number, y: number, salt: number) => {
+    let value = Math.imul((x + salt) | 0, 374761393) ^ Math.imul((y - salt) | 0, 668265263);
+    value = Math.imul(value ^ (value >>> 13), 1274126177);
+    return ((value ^ (value >>> 16)) >>> 0) / 0xffffffff;
+  };
   const make = (name: string, base: [number, number, number], seed: number, striation = false) => {
     const canvas = document.createElement("canvas"); canvas.width = size; canvas.height = size;
     const context = canvas.getContext("2d")!, image = context.createImageData(size, size);
-    const hash = (x: number, y: number, salt: number) => {
-      let value = Math.imul((x + salt) | 0, 374761393) ^ Math.imul((y - salt) | 0, 668265263);
-      value = Math.imul(value ^ (value >>> 13), 1274126177);
-      return ((value ^ (value >>> 16)) >>> 0) / 0xffffffff;
-    };
     const noise = (x: number, y: number, cells: number, salt: number) => {
       const px = x / size * cells, py = y / size * cells, x0 = Math.floor(px), y0 = Math.floor(py);
       const localX = px - x0, localY = py - y0, tx = localX * localX * (3 - 2 * localX), ty = localY * localY * (3 - 2 * localY);
@@ -454,31 +563,106 @@ const createTerrainLayerTextures = (device: pc.GraphicsDevice): TerrainLayerText
     texture.addressU = pc.ADDRESS_REPEAT; texture.addressV = pc.ADDRESS_REPEAT; texture.anisotropy = 8; texture.setSource(canvas);
     return texture;
   };
+  const makeNormalCanvas = (seed: number, profile: "grass" | "dirt" | "rock" | "snow" | "sand") => {
+    const canvas = document.createElement("canvas"); canvas.width = size; canvas.height = size;
+    const context = canvas.getContext("2d")!, image = context.createImageData(size, size);
+    const mineralNoise=(x:number,y:number,cells:number)=>{
+      const px=x/size*cells,py=y/size*cells,ix=Math.floor(px),iy=Math.floor(py);
+      const u=px-ix,v=py-iy,tx=u*u*(3-2*u),ty=v*v*(3-2*v);
+      const at=(dx:number,dy:number)=>hash(((ix+dx)%cells+cells)%cells,((iy+dy)%cells+cells)%cells,seed+cells);
+      return (at(0,0)*(1-tx)+at(1,0)*tx)*(1-ty)+(at(0,1)*(1-tx)+at(1,1)*tx)*ty;
+    };
+    const height = (sourceX: number, sourceY: number) => {
+      const x = (sourceX + size) % size, y = (sourceY + size) % size;
+      const grain = hash(x, y, seed), broad = hash(Math.floor(x / 6), Math.floor(y / 6), seed + 47);
+      if (profile === "grass") return Math.sin((x + Math.sin(y * .19) * 2.4) * .82) * .16 + Math.sin(y * .24) * .05 + (grain - .5) * .08;
+      if (profile === "dirt") return (broad - .5) * .34 + (grain - .5) * .28 + (grain > .91 ? .38 : 0);
+      if (profile === "sand") return Math.sin((x + Math.sin(y * .052) * 10) * .19) * .11 + Math.sin((x + y * .2) * .055) * .035 + (grain - .5) * .018;
+      if (profile === "rock") return Math.abs(mineralNoise(x,y,5)-.5)*.9 + mineralNoise(x,y,17)*.32 + (grain-.5)*.08;
+      return (broad - .5) * .05 + (grain - .5) * .025;
+    };
+    const strength = profile === "dirt" ? 2.1 : profile === "sand" ? 1.18 : profile === "grass" ? 1.45 : profile === "rock" ? 2.5 : .32;
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const dx = (height(x + 1, y) - height(x - 1, y)) * strength;
+      const dy = (height(x, y + 1) - height(x, y - 1)) * strength;
+      const length = Math.max(.0001, Math.hypot(dx, dy, 1)), index = (y * size + x) * 4;
+      image.data[index] = Math.round((-dx / length * .5 + .5) * 255);
+      image.data[index + 1] = Math.round((-dy / length * .5 + .5) * 255);
+      image.data[index + 2] = Math.round((1 / length * .5 + .5) * 255);
+      image.data[index + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+    return canvas;
+  };
+  const makeNormal = (name: string, seed: number, profile: "grass" | "dirt" | "rock" | "snow" | "sand") => {
+    const canvas = makeNormalCanvas(seed, profile);
+    const texture = new pc.Texture(device, { name: `world-terrain-${name}-normal`, width: size, height: size, format: pc.PIXELFORMAT_RGBA8, mipmaps: true, minFilter: pc.FILTER_LINEAR_MIPMAP_LINEAR, magFilter: pc.FILTER_LINEAR });
+    texture.addressU = pc.ADDRESS_REPEAT; texture.addressV = pc.ADDRESS_REPEAT; texture.anisotropy = 8; texture.setSource(canvas);
+    return texture;
+  };
+  // One atlas keeps five independent surface responses within WebGPU's
+  // fragment binding budget after environment and shadow textures are added.
+  // Tile order: grass, dirt, sand, rock, snow, road.
+  const normalAtlasCanvas = document.createElement("canvas");
+  normalAtlasCanvas.width = size * 6; normalAtlasCanvas.height = size;
+  const normalAtlasContext = normalAtlasCanvas.getContext("2d")!;
+  const normalProfiles: [number, "grass" | "dirt" | "rock" | "snow" | "sand"][] = [
+    [211, "grass"], [307, "dirt"], [353, "sand"], [401, "rock"], [503, "snow"], [607, "dirt"],
+  ];
+  normalProfiles.forEach(([seed, profile], index) => normalAtlasContext.drawImage(makeNormalCanvas(seed, profile), index * size, 0));
+  const normalAtlas = new pc.Texture(device, { name: "world-terrain-surface-normal-atlas", width: size * 6, height: size, format: pc.PIXELFORMAT_RGBA8, mipmaps: true, minFilter: pc.FILTER_LINEAR_MIPMAP_LINEAR, magFilter: pc.FILTER_LINEAR });
+  normalAtlas.addressU = pc.ADDRESS_CLAMP_TO_EDGE; normalAtlas.addressV = pc.ADDRESS_REPEAT; normalAtlas.anisotropy = 8; normalAtlas.setSource(normalAtlasCanvas);
   return {
-    grass: make("grass", [82, 113, 65], 19), dirt: make("dirt", [112, 82, 51], 43),
+    grass: make("grass", [82, 113, 65], 19), dirt: make("dirt", [112, 82, 51], 43), sand: make("sand", [194, 151, 88], 59, true),
     rock: make("rock", [113, 114, 108], 71, true), snow: make("snow", [210, 218, 220], 101), road: make("road", [108, 76, 45], 137, true),
+    grassNormal: makeNormal("grass", 211, "grass"), dirtNormal: makeNormal("dirt", 307, "dirt"), sandNormal: makeNormal("sand", 353, "sand"),
+    rockNormal: makeNormal("rock", 401, "rock"), snowNormal: makeNormal("snow", 503, "snow"), roadNormal: makeNormal("road", 607, "dirt"),
+    normalAtlas,
   };
 };
 
 /** PBR terrain with true world-space triplanar projection, normal/slope blend,
  * height blend, and an alpha-carried road weight. */
-export const configureWorldTerrainMaterial = (material: pc.StandardMaterial, device: pc.GraphicsDevice): void => {
+export const configureWorldTerrainMaterial = (material: pc.StandardMaterial, device: pc.GraphicsDevice, biomeId = "forest"): void => {
   let layers = terrainLayerCache.get(device);
   if (!layers) { layers = createTerrainLayerTextures(device); terrainLayerCache.set(device, layers); }
   material.diffuseMap = null;
+  // `materialFor` starts with a generic five-map PBR surface. Terrain owns a
+  // purpose-built texture set, so retaining those bindings wastes samplers and
+  // can exceed WebGPU's per-stage limit even though their shader paths are no
+  // longer authoritative.
+  material.normalMap = null;
+  material.normalDetailMap = null;
+  material.aoMap = null;
+  material.aoDetailMap = null;
+  material.glossMap = null;
+  material.metalnessMap = null;
+  material.heightMap = null;
   material.diffuse = new pc.Color(1, 1, 1);
   material.diffuseVertexColor = true;
-  material.gloss = .12;
+  material.gloss = .04;
   material.metalness = 0;
-  material.bumpiness = .5;
-  material.setParameter("uTerrainGrass", layers.grass);
-  material.setParameter("uTerrainDirt", layers.dirt);
-  material.setParameter("uTerrainRock", layers.rock);
+  material.bumpiness = 1;
+  material.clearCoat = 0;
+  material.clearCoatGloss = 0;
+  material.specularityFactor = .09;
+  material.specular = new pc.Color(.08, .08, .08);
+  const desert = biomeId === "desert";
+  material.setParameter("uTerrainGrass", desert ? layers.sand : layers.grass);
+  material.setParameter("uTerrainDirt", biomeId === "desert" ? layers.sand : layers.dirt);
+  material.setParameter("uTerrainRock", desert ? layers.dirt : layers.rock);
   material.setParameter("uTerrainSnow", layers.snow);
   material.setParameter("uTerrainRoad", layers.road);
+  material.setParameter("uTerrainGrassNormal", layers.grassNormal);
+  material.setParameter("uTerrainDirtNormal", biomeId === "desert" ? layers.sandNormal : layers.dirtNormal);
+  material.setParameter("uTerrainRockNormal", layers.rockNormal);
+  material.setParameter("uTerrainSnowNormal", layers.snowNormal);
+  material.setParameter("uTerrainRoadNormal", layers.roadNormal);
+  material.setParameter("uTerrainNormalAtlas", layers.normalAtlas);
   material.shaderChunksVersion = "2.21";
   material.getShaderChunks(pc.SHADERLANGUAGE_GLSL).set("diffusePS", `
 uniform vec3 material_diffuse;
+uniform vec4 uWorldSurfaceWeather;
 uniform sampler2D uTerrainGrass;
 uniform sampler2D uTerrainDirt;
 uniform sampler2D uTerrainRock;
@@ -490,23 +674,48 @@ vec3 dndromTriplanar(sampler2D source, vec3 world, vec3 weights, float scale) {
   vec3 z = texture2D(source, world.xy * scale).rgb;
   return x * weights.x + y * weights.y + z * weights.z;
 }
+float dndromTerrainHash(vec2 cell) {
+  return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453123);
+}
+float dndromTerrainNoise(vec2 world, float scale) {
+  vec2 point = world * scale;
+  vec2 cell = floor(point), local = fract(point);
+  local = local * local * (3.0 - 2.0 * local);
+  float a = dndromTerrainHash(cell);
+  float b = dndromTerrainHash(cell + vec2(1.0, 0.0));
+  float c = dndromTerrainHash(cell + vec2(0.0, 1.0));
+  float d = dndromTerrainHash(cell + vec2(1.0, 1.0));
+  return mix(mix(a, b, local.x), mix(c, d, local.x), local.y);
+}
 void getAlbedo() {
   vec3 normal = normalize(dVertexNormalW);
   vec3 weights = pow(abs(normal), vec3(5.0));
   weights /= max(dot(weights, vec3(1.0)), .0001);
   float up = clamp(dot(normal, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
   float cliff = 1.0 - smoothstep(.48, .76, up);
-  float highland = smoothstep(5.0, 10.5, vPositionW.y);
+  float highland = max(uWorldSurfaceWeather.y, smoothstep(uWorldSurfaceWeather.z, uWorldSurfaceWeather.z + 90.0, vPositionW.y));
   vec3 grass = dndromTriplanar(uTerrainGrass, vPositionW, weights, .19);
   vec3 dirt = dndromTriplanar(uTerrainDirt, vPositionW, weights, .23);
-  vec3 rock = dndromTriplanar(uTerrainRock, vPositionW, weights, .16);
+  vec3 rock = mix(dndromTriplanar(uTerrainRock, vPositionW, weights, .017), dndromTriplanar(uTerrainRock, vPositionW, weights, .16), .38);
   vec3 snow = dndromTriplanar(uTerrainSnow, vPositionW, weights, .21);
   vec3 road = dndromTriplanar(uTerrainRoad, vPositionW, weights, .27);
-  vec3 biomeTint = saturate(vVertexColor.rgb);
-  vec3 natural = mix(mix(dirt, grass, smoothstep(.58, .9, up)), rock, cliff);
+  float fieldRock = saturate(max(vVertexColor.r, cliff));
+  float fieldGrass = saturate(vVertexColor.g * smoothstep(.42, .82, up));
+  float fieldWet = saturate(vVertexColor.b * (1.0 - fieldRock));
+  float fieldSoil = max(0.0, 1.0 - fieldRock - fieldGrass * .82 - fieldWet * .72);
+  float fieldTotal = max(.0001, fieldRock + fieldGrass + fieldWet + fieldSoil);
+  fieldRock /= fieldTotal; fieldGrass /= fieldTotal; fieldWet /= fieldTotal; fieldSoil /= fieldTotal;
+  vec3 wetSoil = dirt * vec3(.48, .62, .5);
+  vec3 natural = rock * fieldRock + grass * fieldGrass + wetSoil * fieldWet + dirt * fieldSoil;
+  float macroA = dndromTerrainNoise(vPositionW.xz, .052);
+  float macroB = dndromTerrainNoise(vPositionW.xz + vec2(41.7, -19.3), .019);
+  float macroVariation = .84 + macroA * .17 + macroB * .11;
+  natural *= macroVariation;
+  natural *= 1.0 - uWorldSurfaceWeather.x * .32 * up;
+  natural *= mix(vec3(.91, .96, .86), vec3(1.06, .96, .88), macroB * .45);
   natural = mix(natural, snow, highland * smoothstep(.68, .94, up));
   float roadWeight = saturate(vVertexColor.a);
-  dAlbedo = material_diffuse.rgb * mix(natural * (.55 + biomeTint * .72), road, roadWeight);
+  dAlbedo = material_diffuse.rgb * mix(natural, road, roadWeight);
 }
 `);
   // WGSL cannot portably pass texture/sampler handles through a helper as the
@@ -514,6 +723,7 @@ void getAlbedo() {
   // native WGSL instead of PlayCanvas' compatibility transpiler.
   material.getShaderChunks(pc.SHADERLANGUAGE_WGSL).set("diffusePS", `
 uniform material_diffuse: vec3f;
+uniform uWorldSurfaceWeather: vec4f;
 var uTerrainGrass: texture_2d<f32>;
 var uTerrainGrassSampler: sampler;
 var uTerrainDirt: texture_2d<f32>;
@@ -524,33 +734,140 @@ var uTerrainSnow: texture_2d<f32>;
 var uTerrainSnowSampler: sampler;
 var uTerrainRoad: texture_2d<f32>;
 var uTerrainRoadSampler: sampler;
+fn dndromTerrainHash(cell: vec2f) -> f32 {
+  return fract(sin(dot(cell, vec2f(127.1, 311.7))) * 43758.5453123);
+}
+fn dndromTerrainNoise(world: vec2f, scale: f32) -> f32 {
+  let point: vec2f = world * scale;
+  let cell: vec2f = floor(point);
+  var local: vec2f = fract(point);
+  local = local * local * (vec2f(3.0) - 2.0 * local);
+  let a: f32 = dndromTerrainHash(cell);
+  let b: f32 = dndromTerrainHash(cell + vec2f(1.0, 0.0));
+  let c: f32 = dndromTerrainHash(cell + vec2f(0.0, 1.0));
+  let d: f32 = dndromTerrainHash(cell + vec2f(1.0, 1.0));
+  return mix(mix(a, b, local.x), mix(c, d, local.x), local.y);
+}
 fn getAlbedo() {
   let normal: vec3f = normalize(dVertexNormalW);
   var weights: vec3f = pow(abs(normal), vec3f(5.0));
   weights /= max(dot(weights, vec3f(1.0)), .0001);
   let up: f32 = clamp(dot(normal, vec3f(0.0, 1.0, 0.0)), 0.0, 1.0);
   let cliff: f32 = 1.0 - smoothstep(.48, .76, up);
-  let highland: f32 = smoothstep(5.0, 10.5, vPositionW.y);
+  let highland: f32 = max(uniform.uWorldSurfaceWeather.y, smoothstep(uniform.uWorldSurfaceWeather.z, uniform.uWorldSurfaceWeather.z + 90.0, vPositionW.y));
   let grass: vec3f = textureSample(uTerrainGrass, uTerrainGrassSampler, vPositionW.zy * .19).rgb * weights.x
     + textureSample(uTerrainGrass, uTerrainGrassSampler, vPositionW.xz * .19).rgb * weights.y
     + textureSample(uTerrainGrass, uTerrainGrassSampler, vPositionW.xy * .19).rgb * weights.z;
   let dirt: vec3f = textureSample(uTerrainDirt, uTerrainDirtSampler, vPositionW.zy * .23).rgb * weights.x
     + textureSample(uTerrainDirt, uTerrainDirtSampler, vPositionW.xz * .23).rgb * weights.y
     + textureSample(uTerrainDirt, uTerrainDirtSampler, vPositionW.xy * .23).rgb * weights.z;
-  let rock: vec3f = textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.zy * .16).rgb * weights.x
+  let rockFine: vec3f = textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.zy * .16).rgb * weights.x
     + textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.xz * .16).rgb * weights.y
     + textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.xy * .16).rgb * weights.z;
+  let rockMacro: vec3f = textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.zy * .017).rgb * weights.x
+    + textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.xz * .017).rgb * weights.y
+    + textureSample(uTerrainRock, uTerrainRockSampler, vPositionW.xy * .017).rgb * weights.z;
+  let rock: vec3f = mix(rockMacro, rockFine, .38);
   let snow: vec3f = textureSample(uTerrainSnow, uTerrainSnowSampler, vPositionW.zy * .21).rgb * weights.x
     + textureSample(uTerrainSnow, uTerrainSnowSampler, vPositionW.xz * .21).rgb * weights.y
     + textureSample(uTerrainSnow, uTerrainSnowSampler, vPositionW.xy * .21).rgb * weights.z;
   let road: vec3f = textureSample(uTerrainRoad, uTerrainRoadSampler, vPositionW.zy * .27).rgb * weights.x
     + textureSample(uTerrainRoad, uTerrainRoadSampler, vPositionW.xz * .27).rgb * weights.y
     + textureSample(uTerrainRoad, uTerrainRoadSampler, vPositionW.xy * .27).rgb * weights.z;
-  let biomeTint: vec3f = saturate3(vVertexColor.rgb);
-  var natural: vec3f = mix(mix(dirt, grass, smoothstep(.58, .9, up)), rock, cliff);
+  var fieldRock: f32 = saturate(max(vVertexColor.r, cliff));
+  var fieldGrass: f32 = saturate(vVertexColor.g * smoothstep(.42, .82, up));
+  var fieldWet: f32 = saturate(vVertexColor.b * (1.0 - fieldRock));
+  var fieldSoil: f32 = max(0.0, 1.0 - fieldRock - fieldGrass * .82 - fieldWet * .72);
+  let fieldTotal: f32 = max(.0001, fieldRock + fieldGrass + fieldWet + fieldSoil);
+  fieldRock /= fieldTotal; fieldGrass /= fieldTotal; fieldWet /= fieldTotal; fieldSoil /= fieldTotal;
+  let wetSoil: vec3f = dirt * vec3f(.48, .62, .5);
+  var natural: vec3f = rock * fieldRock + grass * fieldGrass + wetSoil * fieldWet + dirt * fieldSoil;
+  let macroA: f32 = dndromTerrainNoise(vPositionW.xz, .052);
+  let macroB: f32 = dndromTerrainNoise(vPositionW.xz + vec2f(41.7, -19.3), .019);
+  let macroVariation: f32 = .84 + macroA * .17 + macroB * .11;
+  natural *= macroVariation;
+  natural *= 1.0 - uniform.uWorldSurfaceWeather.x * .32 * up;
+  natural *= mix(vec3f(.91, .96, .86), vec3f(1.06, .96, .88), macroB * .45);
   natural = mix(natural, snow, highland * smoothstep(.68, .94, up));
   let roadWeight: f32 = saturate(vVertexColor.a);
-  dAlbedo = uniform.material_diffuse.rgb * mix(natural * (.55 + biomeTint * .72), road, roadWeight);
+  dAlbedo = uniform.material_diffuse.rgb * mix(natural, road, roadWeight);
+}
+`);
+  const grassNormalTile = desert ? 2 : 0;
+  const dirtNormalTile = desert ? 2 : 1;
+  material.getShaderChunks(pc.SHADERLANGUAGE_GLSL).set("normalMapPS", `
+uniform sampler2D uTerrainNormalAtlas;
+vec3 dndromAtlasNormal(float tile, vec2 worldUv, float scale) {
+  vec2 localUv = clamp(fract(worldUv * scale), vec2(.004), vec2(.996));
+  vec2 atlasUv = vec2((tile + localUv.x) / 6.0, localUv.y);
+  return texture2D(uTerrainNormalAtlas, atlasUv).xyz * 2.0 - 1.0;
+}
+void getNormal() {
+  vec3 geometric = normalize(dVertexNormalW);
+  float up = clamp(dot(geometric, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
+  float rock = max(saturate(vVertexColor.r), 1.0 - smoothstep(.48, .76, up));
+  float road = saturate(vVertexColor.a);
+  float grass = saturate(vVertexColor.g) * smoothstep(.42, .82, up) * (1.0 - rock) * (1.0 - road);
+  float soil = max(0.0, 1.0 - rock - grass - road);
+  vec3 detail = dndromAtlasNormal(${grassNormalTile.toFixed(1)}, vPositionW.xz, .19) * grass
+    + dndromAtlasNormal(${dirtNormalTile.toFixed(1)}, vPositionW.xz, .23) * soil
+    + dndromAtlasNormal(3.0, vPositionW.xz, .16) * rock
+    + dndromAtlasNormal(5.0, vPositionW.xz, .27) * road;
+  detail = normalize(detail + vec3(0.0, 0.0, .0001));
+  vec3 reference = abs(geometric.y) > .985 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+  vec3 tangent = normalize(cross(reference, geometric));
+  vec3 bitangent = normalize(cross(geometric, tangent));
+  vec3 mapped = normalize(tangent * detail.x + bitangent * detail.y + geometric * max(.22, detail.z));
+  dNormalW = normalize(mix(geometric, mapped, .58 * (1.0 - smoothstep(.2, 2.0, max(length(dFdx(vPositionW)), length(dFdy(vPositionW)))))));
+}`);
+  material.getShaderChunks(pc.SHADERLANGUAGE_WGSL).set("normalMapPS", `
+var uTerrainNormalAtlas: texture_2d<f32>;
+var uTerrainNormalAtlasSampler: sampler;
+fn dndromAtlasNormal(tile: f32, worldUv: vec2f, scale: f32) -> vec3f {
+  let localUv: vec2f = clamp(fract(worldUv * scale), vec2f(.004), vec2f(.996));
+  let atlasUv: vec2f = vec2f((tile + localUv.x) / 6.0, localUv.y);
+  return textureSample(uTerrainNormalAtlas, uTerrainNormalAtlasSampler, atlasUv).xyz * 2.0 - 1.0;
+}
+fn getNormal() {
+  let geometric: vec3f = normalize(dVertexNormalW);
+  let up: f32 = clamp(dot(geometric, vec3f(0.0, 1.0, 0.0)), 0.0, 1.0);
+  let rock: f32 = max(saturate(vVertexColor.r), 1.0 - smoothstep(.48, .76, up));
+  let road: f32 = saturate(vVertexColor.a);
+  let grass: f32 = saturate(vVertexColor.g) * smoothstep(.42, .82, up) * (1.0 - rock) * (1.0 - road);
+  let soil: f32 = max(0.0, 1.0 - rock - grass - road);
+  var detail: vec3f = dndromAtlasNormal(${grassNormalTile.toFixed(1)}, vPositionW.xz, .19) * grass
+    + dndromAtlasNormal(${dirtNormalTile.toFixed(1)}, vPositionW.xz, .23) * soil
+    + dndromAtlasNormal(3.0, vPositionW.xz, .16) * rock
+    + dndromAtlasNormal(5.0, vPositionW.xz, .27) * road;
+  detail = normalize(detail + vec3f(0.0, 0.0, .0001));
+  let reference: vec3f = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(geometric.y) > .985);
+  let tangent: vec3f = normalize(cross(reference, geometric));
+  let bitangent: vec3f = normalize(cross(geometric, tangent));
+  let mapped: vec3f = normalize(tangent * detail.x + bitangent * detail.y + geometric * max(.22, detail.z));
+  dNormalW = normalize(mix(geometric, mapped, .58 * (1.0 - smoothstep(.2, 2.0, max(length(dpdx(vPositionW)), length(dpdy(vPositionW)))))));
+}`);
+  material.getShaderChunks(pc.SHADERLANGUAGE_GLSL).set("glossPS", `
+void getGlossiness() {
+  vec3 normal = normalize(dVertexNormalW);
+  float up = clamp(dot(normal, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
+  float rock = max(saturate(vVertexColor.r), 1.0 - smoothstep(.48, .76, up));
+  float road = saturate(vVertexColor.a);
+  float grass = saturate(vVertexColor.g) * smoothstep(.42, .82, up) * (1.0 - rock) * (1.0 - road);
+  float dirt = max(0.0, 1.0 - grass - rock - road);
+  dGlossiness = grass * .035 + dirt * .018 + rock * .075 + road * .012 + .0000001;
+  dGlossiness = mix(dGlossiness, .72, uWorldSurfaceWeather.x * up * (1.0 - grass * .7));
+}
+`);
+  material.getShaderChunks(pc.SHADERLANGUAGE_WGSL).set("glossPS", `
+fn getGlossiness() {
+  let normal: vec3f = normalize(dVertexNormalW);
+  let up: f32 = clamp(dot(normal, vec3f(0.0, 1.0, 0.0)), 0.0, 1.0);
+  let rock: f32 = max(saturate(vVertexColor.r), 1.0 - smoothstep(.48, .76, up));
+  let road: f32 = saturate(vVertexColor.a);
+  let grass: f32 = saturate(vVertexColor.g) * smoothstep(.42, .82, up) * (1.0 - rock) * (1.0 - road);
+  let dirt: f32 = max(0.0, 1.0 - grass - rock - road);
+  dGlossiness = grass * .035 + dirt * .018 + rock * .075 + road * .012 + .0000001;
+  dGlossiness = mix(dGlossiness, .72, uniform.uWorldSurfaceWeather.x * up * (1.0 - grass * .7));
 }
 `);
   material.update();
@@ -559,7 +876,21 @@ fn getAlbedo() {
 /** Adds low-frequency trunk motion and higher-frequency crown flutter without
  * abandoning StandardMaterial, so foliage keeps PBR, sun, probes, and matching
  * animated shadow-map geometry. */
-export const configureWorldVegetationMaterial = (material: pc.StandardMaterial): void => {
+export const configureWorldVegetationMaterial = (material: pc.StandardMaterial, bark = false): void => {
+  // Animated vegetation has no motion-vector pass. Specular and normal-map
+  // highlights therefore crawl between TAA samples and read as white twinkle.
+  // Keep the leaves fully diffuse/matte; geometry, sunlight, and cast shadows
+  // still provide their shape.
+  if (!bark) material.normalMap = null;
+  if (!bark) material.glossMap = null;
+  material.metalnessMap = null;
+  material.heightMap = null;
+  material.clearCoat = 0;
+  material.gloss = bark ? .08 : 0;
+  material.metalness = 0;
+  material.specularityFactor = bark ? .15 : 0;
+  material.specular = new pc.Color(bark ? .04 : 0, bark ? .04 : 0, bark ? .04 : 0);
+  material.sheen = new pc.Color(0, 0, 0);
   material.shaderChunksVersion = "2.21";
   material.getShaderChunks(pc.SHADERLANGUAGE_GLSL).set("transformVS", `
 #ifdef PIXELSNAP
@@ -569,15 +900,16 @@ uniform vec4 uScreenSize;
 uniform float projectionFlipY;
 #endif
 uniform float uTime;
+uniform vec2 uWorldWind;
 vec4 evalWorldPosition(vec3 vertexPosition, mat4 modelMatrix) {
   vec3 localPos = getLocalPosition(vertexPosition);
   float crown = smoothstep(.3, 3.8, localPos.y);
   float trunk = smoothstep(.08, 1.7, localPos.y) * .35;
   vec4 unbentWorld = modelMatrix * vec4(localPos, 1.0);
-  float gust = sin(uTime * 1.12 + unbentWorld.x * .105 + unbentWorld.z * .071);
-  float flutter = sin(uTime * 2.83 + unbentWorld.x * .47 - unbentWorld.z * .39 + localPos.y * 1.9);
-  localPos.x += (gust * .14 * (trunk + crown) + flutter * .035 * crown);
-  localPos.z += (gust * .075 * (trunk + crown) - flutter * .025 * crown);
+  float gust = sin(uTime * .68 + unbentWorld.x * .105 + unbentWorld.z * .071);
+  float flutter = sin(uTime * 1.4 + unbentWorld.x * .47 - unbentWorld.z * .39 + localPos.y * 1.9);
+  localPos.x += (gust * .065 * (trunk + crown) + flutter * .012 * crown) * uWorldWind.x;
+  localPos.z += (gust * .038 * (trunk + crown) - flutter * .009 * crown) * uWorldWind.y;
   #ifdef NINESLICED
     localPos.xz *= outerScale;
     vec2 positiveUnitOffset = clamp(vertexPosition.xz, vec2(0.0), vec2(1.0));
@@ -630,15 +962,16 @@ vec3 getWorldPosition() { return dPositionW; }
   uniform projectionFlipY: f32;
 #endif
 uniform uTime: f32;
+uniform uWorldWind: vec2f;
 fn evalWorldPosition(vertexPosition: vec3f, modelMatrix: mat4x4f) -> vec4f {
   var localPos: vec3f = getLocalPosition(vertexPosition);
   let crown: f32 = smoothstep(.3, 3.8, localPos.y);
   let trunk: f32 = smoothstep(.08, 1.7, localPos.y) * .35;
   let unbentWorld: vec4f = modelMatrix * vec4f(localPos, 1.0);
-  let gust: f32 = sin(uniform.uTime * 1.12 + unbentWorld.x * .105 + unbentWorld.z * .071);
-  let flutter: f32 = sin(uniform.uTime * 2.83 + unbentWorld.x * .47 - unbentWorld.z * .39 + localPos.y * 1.9);
-  localPos.x += gust * .14 * (trunk + crown) + flutter * .035 * crown;
-  localPos.z += gust * .075 * (trunk + crown) - flutter * .025 * crown;
+  let gust: f32 = sin(uniform.uTime * .68 + unbentWorld.x * .105 + unbentWorld.z * .071);
+  let flutter: f32 = sin(uniform.uTime * 1.4 + unbentWorld.x * .47 - unbentWorld.z * .39 + localPos.y * 1.9);
+  localPos.x += (gust * .065 * (trunk + crown) + flutter * .012 * crown) * uniform.uWorldWind.x;
+  localPos.z += (gust * .038 * (trunk + crown) - flutter * .009 * crown) * uniform.uWorldWind.y;
   #ifdef NINESLICED
     var localPosXZ: vec2f = localPos.xz;
     localPosXZ *= uniform.outerScale;
@@ -683,6 +1016,7 @@ fn getPosition() -> vec4f {
 fn getWorldPosition() -> vec3f { return dPositionW; }
 `);
   material.setParameter("uTime", 0);
+  material.setParameter("uWorldWind", [1,1]);
   material.update();
 };
 

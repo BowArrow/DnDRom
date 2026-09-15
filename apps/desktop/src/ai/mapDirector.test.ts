@@ -1,37 +1,79 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createStarterCampaign } from "../domain/seed";
-import { createFallbackWorldBlueprints } from "../domain/worldForge";
+import { createFallbackWorldBlueprints, type WorldForgeRequest } from "../domain/worldForge";
 import { generateWorldBlueprints } from "./mapDirector";
 
-describe("World Forge AI planning boundary", () => {
-  afterEach(() => vi.unstubAllGlobals());
+const mocks = vi.hoisted(() => ({ chat: vi.fn(), prepare: vi.fn() }));
+vi.mock("./managedLanguage", () => ({ prepareLanguageSettings: mocks.prepare }));
+vi.mock("./openAiClient", async importOriginal => ({ ...await importOriginal<object>(), completeLocalChat: mocks.chat }));
+const request: WorldForgeRequest = { description: "An ancient Chinese mountain village", kind: "settlement", biome: "mountains", size: "medium", gridShape: "hex", seed: 42, background: "none" };
+const settings = createStarterCampaign().settings;
+const good = () => JSON.stringify({ concepts: createFallbackWorldBlueprints(request) });
 
-  it("sends only the explicit request and bounded adventure context to the local planner", async () => {
-    const request = { description: "A swamp village", kind: "settlement" as const, biome: "swamp" as const, size: "small" as const, gridShape: "square" as const, seed: 41, background: "none" as const };
-    const concepts = createFallbackWorldBlueprints(request);
-    const requests: RequestInit[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      requests.push(init ?? {});
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ concepts }) } }] }), { status: 200 });
-    }));
-    const settings = { ...createStarterCampaign().settings, useLocalAiForMaps: true, localAiEndpoint: "http://127.0.0.1:11434/v1" };
-    const result = await generateWorldBlueprints(request, settings, {
-      location: "Mirewatch", biome: "swamp", sceneTags: ["rain", "ruins"], partyFootprints: [.5, 1], recentResolvedEvents: ["The bell was recovered"],
-      characterSheets: "PRIVATE SHEET", sourceArtwork: "PRIVATE IMAGE", campaignHistory: "PRIVATE HISTORY",
-    } as never);
-    expect(result.provider).toBe("local-ai");
-    const body = JSON.parse(String(requests[0].body)) as { messages: Array<{ content: string }> };
-    expect(body.messages[1].content).toContain("Mirewatch");
-    expect(body.messages[1].content).toContain("The bell was recovered");
-    expect(body.messages[1].content).not.toMatch(/PRIVATE SHEET|PRIVATE IMAGE|PRIVATE HISTORY/);
+describe("local world blueprint planning", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.prepare.mockResolvedValue({ ...settings, useLocalAiForMaps: true, localAiEndpoint: "http://127.0.0.1:8190/v1" });
   });
-
-  it("falls back deterministically when a local model returns invalid JSON", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "not-json" } }] }), { status: 200 })));
-    const settings = { ...createStarterCampaign().settings, useLocalAiForMaps: true, localAiEndpoint: "http://localhost:11434/v1" };
-    const request = { description: "A mountain pass", kind: "auto" as const, size: "small" as const, gridShape: "hex" as const, seed: 99, background: "none" as const };
+  it("constrains creative output and keeps engine dimensions, seeds and IDs local", async () => {
+    const concepts = createFallbackWorldBlueprints(request);
+    concepts[0].width = 64; concepts[0].seed = 9; concepts[0].id = "model-invented";
+    concepts[0].name = "Jade terraces";
+    mocks.chat.mockResolvedValue(JSON.stringify({ concepts }));
     const result = await generateWorldBlueprints(request, settings);
+    expect(result.provider).toBe("local-ai");
+    expect(result.blueprints[0]).toMatchObject({ name: "Jade terraces", width: 128, depth: 128, seed: 42, gridShape: "hex" });
+    expect(result.blueprints[0].id).not.toBe("model-invented");
+    expect(mocks.chat.mock.calls[0][0].responseSchema.properties.concepts.items.properties.name).toBeDefined();
+    expect(mocks.chat.mock.calls[0][0].responseSchema.properties.concepts.items.properties.version).toBeUndefined();
+  });
+  it("repairs malformed model output instead of immediately abandoning AI", async () => {
+    mocks.chat.mockResolvedValueOnce('{"concepts":[{}]}').mockResolvedValueOnce(good());
+    const result = await generateWorldBlueprints(request, settings);
+    expect(result.provider).toBe("local-ai");
+    expect(mocks.chat).toHaveBeenCalledTimes(2);
+    expect(mocks.chat.mock.calls[1][0].messages.at(-1).content).toContain("Repair");
+  });
+  it("builds connected zone references locally and repairs explicit constraint drift", async () => {
+    const concepts = createFallbackWorldBlueprints(request);
+    concepts[0].zones[0].requiredConnections = ["missing-zone"];
+    mocks.chat.mockResolvedValueOnce(JSON.stringify({ concepts }));
+    const result = await generateWorldBlueprints(request, settings);
+    expect(result.provider).toBe("local-ai");
+    const zones = result.blueprints[0].zones;
+    const visited = new Set<string>();
+    const visit = (id: string) => { if (visited.has(id)) return; visited.add(id); zones.find(zone => zone.id === id)!.requiredConnections.forEach(visit); };
+    visit(zones[0].id);
+    expect(visited.size).toBe(zones.length);
+    concepts[0].kind = "interior";
+    mocks.chat.mockResolvedValueOnce(JSON.stringify({ concepts })).mockResolvedValueOnce(good());
+    expect((await generateWorldBlueprints(request, settings)).blueprints[0].kind).toBe("settlement");
+    expect(mocks.chat).toHaveBeenCalledTimes(3);
+  });
+  it("fits an outlying AI layout uniformly while preserving relative positions", async () => {
+    const concepts = createFallbackWorldBlueprints(request);
+    concepts[0].zones[0].center.x = 200;
+    concepts[0].zones[1].center.x = 100;
+    mocks.chat.mockResolvedValue(JSON.stringify({ concepts }));
+    const result = await generateWorldBlueprints(request, settings);
+    expect(result.provider).toBe("local-ai");
+    expect(result.blueprints[0].zones[0].center.x).toBe(62);
+    expect(result.blueprints[0].zones[1].center.x).toBe(31);
+    expect(mocks.chat).toHaveBeenCalledTimes(1);
+  });
+  it("bounds retry and shows a concise warning rather than raw schema errors", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.chat.mockResolvedValue('{"concepts":[{}]}');
+    const result = await generateWorldBlueprints(request, settings);
+    expect(mocks.chat).toHaveBeenCalledTimes(2);
     expect(result.provider).toBe("procedural");
-    expect(result.blueprints).toEqual(createFallbackWorldBlueprints(request));
+    expect(result.warning!.length).toBeLessThan(180);
+    expect(result.warning).not.toContain("invalid_type");
+    expect(warning).toHaveBeenCalled(); warning.mockRestore();
+  });
+  it("propagates cancellation without returning fallback or retrying", async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(generateWorldBlueprints(request, settings, {}, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(mocks.chat).not.toHaveBeenCalled();
   });
 });

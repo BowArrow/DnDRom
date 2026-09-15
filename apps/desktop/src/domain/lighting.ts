@@ -58,7 +58,7 @@ export function prioritizeVisibleLights<T>(candidates: readonly T[], maximum: nu
 
 const moodProfile: Record<LightingMood, { key: [number, number, number]; fill: [number, number, number]; rim: [number, number, number]; sky: [number, number, number]; ground: [number, number, number]; tint: [number, number, number]; clear: [number, number, number]; contrast: number; saturation: number }> = {
   natural: { key: [1, .94, .84], fill: [.42, .55, .74], rim: [.62, .76, 1], sky: [.31, .36, .43], ground: [.14, .13, .11], tint: [1, 1, 1], clear: [.075, .095, .115], contrast: 1.02, saturation: 1.03 },
-  warm: { key: [1, .74, .42], fill: [.28, .38, .58], rim: [.78, .62, 1], sky: [.14, .18, .25], ground: [.14, .075, .035], tint: [1, .94, .82], clear: [.055, .032, .018], contrast: 1.08, saturation: 1.08 },
+  warm: { key: [1, .78, .5], fill: [.38, .46, .62], rim: [.78, .68, 1], sky: [.27, .28, .3], ground: [.13, .1, .075], tint: [1, .96, .88], clear: [.07, .055, .042], contrast: 1.04, saturation: 1.05 },
   moonlight: { key: [.55, .68, 1], fill: [.2, .3, .55], rim: [.7, .83, 1], sky: [.13, .19, .35], ground: [.025, .03, .07], tint: [.8, .9, 1], clear: [.012, .018, .04], contrast: 1.12, saturation: .88 },
   crypt: { key: [.62, .92, .72], fill: [.16, .28, .3], rim: [.45, 1, .76], sky: [.1, .21, .18], ground: [.025, .06, .042], tint: [.74, .93, .82], clear: [.012, .025, .022], contrast: 1.16, saturation: .78 },
   desert: { key: [1, .82, .55], fill: [.5, .36, .28], rim: [1, .73, .48], sky: [.25, .24, .2], ground: [.17, .08, .035], tint: [1, .9, .7], clear: [.08, .047, .026], contrast: 1.1, saturation: 1.12 },
@@ -101,7 +101,7 @@ export function tabletopLightingProfile(theme: MapTheme, width: number, depth: n
   const mood = moodProfile[resolved.mood];
   const budget = LIGHTING_QUALITY_BUDGETS[resolved.quality];
   const base = indoor ? {
-    ambient: [0.24, 0.22, 0.2] as [number, number, number],
+    ambient: [0.3, 0.28, 0.25] as [number, number, number],
     sunColor: [1, 0.9, 0.78],
     sunIntensity: 1.05,
     sunElevation: 72,
@@ -112,7 +112,7 @@ export function tabletopLightingProfile(theme: MapTheme, width: number, depth: n
     normalOffsetBias: 0.18,
     shadowResolution: budget.shadowResolution,
     fillColor: [0.35, 0.48, 0.68],
-    fillIntensity: 0.48,
+    fillIntensity: 0.62,
   } : {
     ambient: [0.2, 0.22, 0.25] as [number, number, number],
     sunColor: [1, 0.91, 0.8],
@@ -150,7 +150,7 @@ export function tabletopLightingProfile(theme: MapTheme, width: number, depth: n
   profile.ambient = profile.ambient.map((value) => nocturnal ? Math.max(value, .15) : clamp(value * .82, .15, .21)) as [number, number, number];
   profile.skyAmbient = profile.skyAmbient.map((value) => nocturnal ? Math.max(value, .18) : clamp(value * .72, .18, .29)) as [number, number, number];
   profile.groundAmbient = profile.groundAmbient.map((value) => nocturnal ? Math.max(value, .065) : clamp(value * .72, .055, .1)) as [number, number, number];
-  profile.sunIntensity = Math.max(profile.sunIntensity, nocturnal ? .95 : 1.62);
+  profile.sunIntensity = Math.max(profile.sunIntensity, nocturnal ? .95 : 1.48);
   profile.sunElevation = Math.min(profile.sunElevation, nocturnal ? 50 : 39);
   profile.fillIntensity = nocturnal ? Math.max(profile.fillIntensity, .34) : Math.min(profile.fillIntensity, .32);
   profile.shadowIntensity = Math.max(profile.shadowIntensity, nocturnal ? .68 : .86);

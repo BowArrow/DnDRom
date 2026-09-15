@@ -1,0 +1,18 @@
+import{mkdirSync,readFileSync,writeFileSync}from'node:fs';import{createRequire}from'node:module';const out='artifacts/surfaces-036';mkdirSync(out,{recursive:true});const require=createRequire(new URL('../apps/desktop/package.json',import.meta.url));
+await require('esbuild').build({stdin:{contents:'export {createStarterCampaign} from "./apps/desktop/src/domain/seed";export * from "./apps/desktop/src/domain/settlementBuildings";export {refreshSettlementFacades} from "./apps/desktop/src/domain/settlementFacadeRefresh";export {expandSceneRecipe} from "./apps/desktop/src/domain/sceneGrammar";export {exportUnrealScene} from "./apps/desktop/src/migration/unrealScene";',resolveDir:process.cwd()},outfile:`${out}/fixtures.mjs`,bundle:true,platform:'node',format:'esm'});
+const p=await import(`../${out}/fixtures.mjs`),map=JSON.parse(readFileSync('artifacts/settlement-034/map.json')),m=map.world.sharedWorld;
+const b=m.locations[0].settlement.buildings,selected=['gable','hip'].map(profile=>b.find(b=>b.role==='home'&&b.recipe.some(p=>p.shape==='roof'&&p.roofProfile===profile)));
+const old=map.entities,entities=selected.map((b,i)=>({...old.find(e=>e.id===b.id),position:{x:(i-1)*20,y:0,z:0},rotation:{x:0,y:0,z:0}}));
+const style=p.settlementStyle({...m.styles[0],family:'courtyard'},m.requests[0]),program=p.buildingProgram('court','home',style),recipe=p.compileBuildingProgram('court',program,style),court={...selected[0],id:'court',recipe};m.locations[0].settlement.buildings.push(court);
+entities.push({...entities[0],id:'court',position:{x:20,y:0,z:0},worldGeometry:{kind:'assembly',recipeId:'court',parts:p.expandSceneRecipe(recipe)}});
+entities.push({id:'ground',assetId:'house-large',name:'Review ground',position:{x:0,y:-.2,z:0},rotation:{x:0,y:0,z:0},scale:{x:1,y:1,z:1},worldGeometry:{kind:'assembly',recipeId:'ground',parts:[p.structuralPart('box',0,0,0,90,.3,50,'ground','#838878')]}});
+map.entities=entities;map.id='surfaces-036';map.weather={...map.weather,hour:12};map.lighting={...map.lighting,mood:'natural'};map.name='Settlement materials and plant growth';map.width=90;map.depth=50;map.pointsOfInterest=[];delete map.journey;map.world.sharedWorld.styles.forEach(s=>s.age=.9);
+// Refresh accepted old recipes, then use a finite terrain fixture for material review.
+map.entities=p.refreshSettlementFacades(map).entities;
+for(const e of map.entities)if(e.worldGeometry?.kind==='assembly'&&e.worldGeometry.parts[0]?.settlementSurface)e.worldGeometry.parts.forEach(p=>p.settlementSurface={...p.settlementSurface,moisture:.82,age:.85});
+map.entities=map.entities.filter(e=>e.id!=='ground');
+map.entities.push({id:'review-ground',name:'Review terrain',assetId:'house-large',position:{x:0,y:0,z:0},rotation:{x:0,y:0,z:0},scale:{x:1,y:1,z:1},worldGeometry:{kind:'terrain',seed:42,originX:-50,originZ:-50,size:100,baseHeight:0,relief:0,roughness:0,erosion:0,paths:[],heightfield:{resolution:3,heights:Array(9).fill(0)}}});
+delete map.world;
+const campaign=p.createStarterCampaign();campaign.map=map;campaign.scenes=[];delete campaign.activeSceneId;campaign.settings.localAiRuntime='disabled';
+writeFileSync(`${out}/review.dndrom`,JSON.stringify(campaign));const beforeExport=JSON.stringify(map);const exported=p.exportUnrealScene(map);for(const mesh of exported.meshes)for(const lod of mesh.lods)for(const field of ['positions','normals','uvs','colors','indices'])if(!lod[field].every(Number.isFinite))throw Error(`${mesh.id} ${field}`);
+writeFileSync(`${out}/export-check.json`,JSON.stringify({meshes:exported.meshes.length,warnings:exported.warnings,oldSavedBuildingsRefreshed:exported.source.map.entities.filter(e=>e.worldGeometry?.recipeId?.endsWith('/surfaces-036')).length,originalSourceUnchanged:beforeExport===JSON.stringify(map)},null,2));

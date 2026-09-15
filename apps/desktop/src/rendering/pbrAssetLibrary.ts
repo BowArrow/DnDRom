@@ -308,7 +308,10 @@ const loadTexture = async (device: pc.GraphicsDevice, url: string, name: string,
   texture.addressU = pc.ADDRESS_REPEAT;
   texture.addressV = pc.ADDRESS_REPEAT;
   texture.anisotropy = 8;
-  texture.setSource(image);
+  // WebGPU's PlayCanvas uploader accepts ImageBitmap/canvas, not HTMLImageElement.
+  // Passing the decoded <img> silently leaves the GPU texture black.
+  // PlayCanvas 2.21 supports ImageBitmap at runtime but omits it in this declaration.
+  (texture as pc.Texture & { setSource(source: ImageBitmap): void }).setSource(await createImageBitmap(image));
   return texture;
 };
 

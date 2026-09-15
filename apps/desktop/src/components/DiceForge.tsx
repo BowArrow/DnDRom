@@ -218,12 +218,14 @@ export function DiceForge({ onBack, onNotify }: DiceForgeProps) {
         <div className="sidebar-section-heading"><Paintbrush size={14} /><span><strong>Surface design</strong><small>Paint, import, or generate</small></span></div>
         <label className="field-label">Theme name<input value={theme.name} onChange={(event) => updateTheme({ name: event.target.value })} /></label>
         <label className="field-label vellum-field">Describe the material<textarea rows={4} value={theme.description} onChange={(event) => updateTheme({ description: event.target.value })} placeholder="Obsidian resin with violet nebula wisps and tiny gold flecks…" /></label>
+        <details className="workspace-disclosure"><summary>Templates & external artwork</summary>
         <section className="dice-template-tools">
           <strong>Universal 2:1 template</strong><small>One wrap layout works across d4–d100. Numbers are separate.</small>
           <button onClick={() => void downloadDiceTextureTemplate()}><Download size={14} /> Download PNG template</button>
           <button onClick={() => void copyPrompt()}><Copy size={14} /> Copy AI prompt</button>
           <button onClick={() => downloadDiceTexturePrompt(theme.description, theme.baseColor)}><Download size={14} /> Download prompt + PBR guide</button>
         </section>
+        </details>
         <button className="primary-button magical-button" onClick={() => void generateLocally()} disabled={working || !theme.description.trim()}>{working ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} Generate texture with local AI</button>
         <small className="dice-ai-note"><Cpu size={12} /> Uses the same private local image model as Scenery Studio. Setup is automatic and resumable.</small>
         <div className="sidebar-section-heading"><Upload size={14} /><span><strong>Custom PBR maps</strong><small>PNG, JPEG, or WebP · 2:1</small></span></div>

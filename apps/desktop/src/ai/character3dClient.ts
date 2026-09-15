@@ -1,4 +1,5 @@
 import {
+  cancelComfyPrompt,
   downloadComfyOutput,
   monitorComfyWorkflow,
   queueComfyWorkflow,
@@ -119,14 +120,17 @@ export async function generateCharacterGlb(
   signal?: AbortSignal,
   onProgress?: (progress: CharacterGenerationProgress) => void,
 ): Promise<File> {
+  signal?.throwIfAborted();
   const assetLabel = options.assetLabel?.trim() || "character";
   onProgress?.({ stage: "workflow", message: `Checking the included ${assetLabel} workflow…`, percent: 22 });
   const readiness = await materializeComfyWorkflow(baseUrl, configureCharacterPreset(workflow, options.provider, options.targetFaces));
+  signal?.throwIfAborted();
   if (readiness.missingNodes.length) throw new Error(`Automatic local tool setup is incomplete. Retry Generate to resume it. Missing executable nodes: ${readiness.missingNodes.join(", ")}`);
   if (readiness.missingModels.length) throw new Error(`Automatic ${options.provider === "pixal3d" ? "Pixal3D" : "TRELLIS.2"} model setup did not finish. Retry Generate and DnDRom will resume it.`);
   if (!readiness.workflow) throw new Error("The included character workflow could not be prepared");
   onProgress?.({ stage: "upload", message: `Uploading the ${assetLabel} concept to private local ComfyUI…`, percent: 30 });
   const upload = await uploadComfyImage(baseUrl, drawing);
+  signal?.throwIfAborted();
   const prepared = prepareCharacter3dWorkflow(readiness.workflow, upload, options);
   const providerName = options.provider === "pixal3d" ? "Pixal3D" : "TRELLIS.2";
   const clientId = crypto.randomUUID();
@@ -144,19 +148,26 @@ export async function generateCharacterGlb(
       reportedByEngine: true,
     });
   });
+  let promptId: string | undefined;
+  const cancel = () => { if (promptId) void cancelComfyPrompt(baseUrl, promptId); };
   try {
     onProgress?.({ stage: "queued", message: `Starting ${providerName} on your GPU…`, percent: 36 });
     await monitor.ready;
-    const promptId = await queueComfyWorkflow(baseUrl, prepared, clientId);
+    signal?.throwIfAborted();
+    promptId = await queueComfyWorkflow(baseUrl, prepared, clientId);
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) { cancel(); signal.throwIfAborted(); }
     monitor.setPromptId(promptId);
     const result = await waitForComfyPrompt(baseUrl, promptId, signal, () => {
       if (!receivedEngineProgress) onProgress?.({ stage: "generate", message: `Running ${providerName} locally…`, percent: 38 });
     });
     onProgress?.({ stage: "download", message: `Importing the textured ${assetLabel} GLB…`, percent: 94 });
     const file = await downloadComfyOutput(baseUrl, selectGlbOutput(result));
+    signal?.throwIfAborted();
     onProgress?.({ stage: "complete", message: `${assetLabel[0].toUpperCase()}${assetLabel.slice(1)} generation complete`, percent: 100 });
     return file;
   } finally {
+    signal?.removeEventListener("abort", cancel);
     monitor.close();
   }
 }

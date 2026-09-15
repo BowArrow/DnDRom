@@ -1,5 +1,7 @@
-import * as pdfjs from "pdfjs-dist";
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+// Unreal's bundled Chromium lacks some newer JavaScript built-ins (including
+// Uint8Array.toHex). Use Mozilla's matching compatibility API and worker.
+import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
+import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { createDefaultCharacter } from "../domain/seed";
 import type { AbilityKey, Character } from "../domain/types";
 
@@ -135,4 +137,3 @@ export async function importCharacterFile(file: File): Promise<CharacterImportRe
   const { fields, text } = await parsePdf(file);
   return characterFromExtracted(file.name, fields, text);
 }
-

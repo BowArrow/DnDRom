@@ -26,7 +26,7 @@ const BUILDING_PALETTES: Record<"timber" | "stone", WorldBuildingGeometry["palet
  * stage: composite footprint, vertical extrusion/floors, facade subdivisions,
  * and the structural module selected for every tile.
  */
-export function generateCgaBuilding(seed: number, prominent = false, material: "timber" | "stone" = "timber"): WorldBuildingGeometry {
+export function generateCgaBuilding(seed: number, prominent = false, material: "timber" | "stone" = "timber", ruin = 0): WorldBuildingGeometry {
   const width = (prominent ? 7.2 : 4.8) + hash01(seed, 0, 17) * (prominent ? 2.2 : 1.5);
   const depth = (prominent ? 5.8 : 3.8) + hash01(seed, 1, 29) * (prominent ? 1.8 : 1.4);
   const setback = clamp(width * (.24 + hash01(seed, 2, 41) * .12), 1.2, width * .42);
@@ -57,7 +57,9 @@ export function generateCgaBuilding(seed: number, prominent = false, material: "
       const windowCadence = (tile + edge + floor) % 2 === 0 || tileCount <= 2;
       const kind = centeredDoor ? "door" : windowCadence && tileWidth > .72 ? "window" : "wall";
       if (centeredDoor) doorPlaced = true;
-      facadeTiles.push({ edge, floor, offset: (tile + .5) * tileWidth, width: tileWidth, kind });
+      const decay = hash01(seed, edge * 137 + tile, 311);
+      const integrity = ruin > 0 ? clamp((1 - ruin) * 1.6 + decay * .9 - floor * .65, 0, 1) : 1;
+      facadeTiles.push({ edge, floor, offset: (tile + .5) * tileWidth, width: tileWidth, kind, ...(ruin > 0 ? { integrity: centeredDoor ? 0 : integrity } : {}) });
     }
   }
   if (!doorPlaced && facadeTiles.length) facadeTiles[0].kind = "door";
@@ -67,7 +69,8 @@ export function generateCgaBuilding(seed: number, prominent = false, material: "
     floors,
     floorHeight,
     wallThickness: .18,
-    roof: prominent ? (hash01(seed, 8, 101) > .45 ? "hip" : "gable") : (hash01(seed, 8, 101) > .2 ? "gable" : "hip"),
+    roof: ruin > .25 ? "ruined" : prominent ? (hash01(seed, 8, 101) > .45 ? "hip" : "gable") : (hash01(seed, 8, 101) > .2 ? "gable" : "hip"),
+    ...(ruin > 0 ? { ruinSeed: seed } : {}),
     facadeTiles,
     palette: BUILDING_PALETTES[material],
   };
@@ -85,12 +88,12 @@ const canopyPoint = (style: WorldBiomeSpec["treeStyle"], seed: number, index: nu
   const azimuth = Math.PI * 2 * ((index * .61803398875 + u * .17) % 1);
   const vertical = v * 2 - 1;
   const belt = Math.sqrt(Math.max(0, 1 - vertical * vertical));
-  const broad = style === "cypress" ? .62 * WORLD_VISUAL_CONFIG.forest.cypressCrownScale : style === "pine" ? 1.16 : 1.58;
-  const verticalRadius = style === "cypress" ? 2.65 : style === "pine" ? 2.2 : 1.65;
+  const broad = height * (style === "cypress" ? .14 * WORLD_VISUAL_CONFIG.forest.cypressCrownScale : style === "pine" ? .23 : .36) * (.85 + hash01(seed, 0, 929) * .3);
+  const verticalRadius = height * (style === "cypress" ? .38 : style === "pine" ? .36 : .29);
   const cone = style === "pine" ? clamp(1.2 - (vertical * .5 + .5) * .7, .34, 1.2) : 1;
   return {
     x: Math.cos(azimuth) * belt * broad * cone * radialJitter,
-    y: height * .58 + vertical * verticalRadius * radialJitter,
+    y: height * .7 + vertical * verticalRadius * radialJitter,
     z: Math.sin(azimuth) * belt * broad * cone * radialJitter,
   };
 };
@@ -98,20 +101,46 @@ const canopyPoint = (style: WorldBiomeSpec["treeStyle"], seed: number, index: nu
 /** Space-colonization tree growth using attraction, kill, and influence radii. */
 export function generateSpaceColonizedTree(seed: number, style: WorldBiomeSpec["treeStyle"], scale = 1): WorldTreeGeometry {
   const resolvedStyle = style === "none" ? "dead" : style;
-  const height = (resolvedStyle === "cypress" ? 7 : resolvedStyle === "pine" ? 6.5 : resolvedStyle === "dead" ? 5.4 : 5.8) * scale;
+  const height = (resolvedStyle === "cypress" ? 9 : resolvedStyle === "pine" ? 10 : resolvedStyle === "dead" ? 6.5 : 8) * scale * (.82 + hash01(seed, 0, 919) * .36);
+  const conifer = resolvedStyle === "pine" || resolvedStyle === "cypress";
   const attractionCount = resolvedStyle === "dead" ? 34 : resolvedStyle === "broadleaf" ? 148 : 124;
   let attractionPoints = Array.from({ length: attractionCount }, (_, index) => canopyPoint(resolvedStyle, seed, index, height));
   const nodes: ColonizationNode[] = [{ position: { x: 0, y: 0, z: 0 }, parent: -1 }];
   const stepLength = .32 * scale, influenceRadius = 2.2 * scale, killDistance = .38 * scale;
 
   // Grow a trunk until it enters the canopy's influence volume.
-  while (nodes[nodes.length - 1].position.y < height * .48) {
+  while (nodes[nodes.length - 1].position.y < height * (conifer ? 1 : .36)) {
     const previous = nodes.length - 1;
     const sway = (hash01(seed, previous, 211) - .5) * .028;
     nodes.push({ position: { x: nodes[previous].position.x + sway, y: nodes[previous].position.y + stepLength, z: nodes[previous].position.z - sway * .6 }, parent: previous });
   }
 
-  for (let iteration = 0; iteration < 72 && attractionPoints.length; iteration++) {
+  if (conifer) {
+    // Excurrent architecture: a persistent leader, lateral whorls and secondary
+    // branchlets. Broadleaf attraction envelopes cannot produce this topology.
+    const trunkCount = nodes.length;
+    for (let level = 4; level < trunkCount - 2; level += 3) {
+      const origin = nodes[level].position, fraction = origin.y / height;
+      const spread = height * (resolvedStyle === "cypress" ? .13 : .28) * (1 - fraction) ** .8;
+      const count = 4 + Math.floor(hash01(seed, level, 1013) * 3);
+      for (let limb = 0; limb < count; limb++) {
+        const azimuth = limb / count * Math.PI * 2 + level * 2.39996 + hash01(seed, level * 7 + limb, 1021) * .5;
+        const reach = spread * (.75 + hash01(seed, level * 7 + limb, 1031) * .4);
+        let parent = level;
+        const steps = Math.max(3, Math.ceil(reach / stepLength));
+        for (let step = 1; step <= steps; step++) {
+          const t = step / steps;
+          const position = { x: origin.x + Math.cos(azimuth) * reach * t, y: origin.y + reach * (-.18 * t + .38 * t ** 3), z: origin.z + Math.sin(azimuth) * reach * t };
+          nodes.push({ position, parent }); parent = nodes.length - 1;
+          if (step > 1 && step % 2 === 0) for (const sign of [-1, 1]) {
+            const lateral = azimuth + sign * .72, twigLength = reach * .32 * (1 - t * .6);
+            nodes.push({ parent, position: { x: position.x + Math.cos(lateral) * twigLength, y: position.y + twigLength * .18, z: position.z + Math.sin(lateral) * twigLength } });
+          }
+        }
+      }
+    }
+  }
+  for (let iteration = 0; !conifer && iteration < 90 && attractionPoints.length; iteration++) {
     const influences = new Map<number, Vec3[]>(), survivors: Vec3[] = [];
     for (const point of attractionPoints) {
       let nearest = -1, nearestDistance = Number.POSITIVE_INFINITY;
@@ -141,24 +170,40 @@ export function generateSpaceColonizedTree(seed: number, style: WorldBiomeSpec["
     if (!additions.length) break;
   }
 
-  const childCounts = new Array(nodes.length).fill(1);
-  for (let index = nodes.length - 1; index > 0; index--) childCounts[nodes[index].parent] += childCounts[index];
+  // A node owns one radius. Adjacent trunk segments must meet at that radius,
+  // rather than independently shrinking and restarting as stacked cones.
+  // Supported twig length approximates sapwood area (a pipe-model heuristic).
+  const support = new Array<number>(nodes.length).fill(.08 * scale);
+  const mainChild = new Array<number>(nodes.length).fill(-1);
+  for (let index = nodes.length - 1; index > 0; index--) {
+    const parent = nodes[index].parent;
+    support[parent] += support[index] + distance(nodes[parent].position, nodes[index].position);
+    if (mainChild[parent] < 0 || support[index] > support[mainChild[parent]]) mainChild[parent] = index;
+  }
+  const basalRadius = height * (.034 + hash01(seed, 0, 947) * .009);
+  const radii = nodes.map((node, index) => {
+    const pipe = Math.sqrt(support[index] / support[0]);
+    const flare = 1 + .55 * Math.exp(-node.position.y / (.28 * scale));
+    return Math.max(.008 * scale, basalRadius * pipe) * flare;
+  });
   const branches = nodes.slice(1).map((node, branchIndex) => {
     const nodeIndex = branchIndex + 1, parent = nodes[node.parent];
-    const startRadius = clamp(.018 + Math.pow(childCounts[node.parent], .46) * .018, .025, .27 * scale);
-    const endRadius = clamp(.012 + Math.pow(childCounts[nodeIndex], .44) * .014, .012, startRadius * .82);
+    const endRadius = radii[nodeIndex];
+    // A lateral starts inside its supporting limb; it does not inherit the
+    // full trunk diameter. The dominant continuation shares the exact ring.
+    const startRadius = mainChild[node.parent] === nodeIndex ? radii[node.parent]
+      : Math.min(radii[node.parent], endRadius * 1.12);
     return { parent: node.parent, start: parent.position, end: node.position, startRadius, endRadius };
   });
   const hasChild = new Set(nodes.slice(1).map((node) => node.parent));
-  const terminals = nodes.map((node, index) => ({ node, index })).filter(({ node, index }) => index > 0 && !hasChild.has(index) && node.position.y > height * .42);
+  const terminals = nodes.map((node, index) => ({ node, index })).filter(({ node, index }) => index > 0 && !hasChild.has(index) && node.position.y > height * (conifer ? .12 : .42));
   const crownNodes = nodes.map((node, index) => ({ node, index })).filter(({ node, index }) => index > 0 && node.position.y > height * .57 && (index % 7 === 0 || !hasChild.has(index)));
   const leafClusters = resolvedStyle === "dead" ? [] : [...terminals, ...crownNodes]
     .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.index === entry.index) === index)
-    .filter((_, index, entries) => index % Math.max(1, Math.floor(entries.length / 42)) === 0)
-    .slice(0, 52)
+    .filter((_, index, entries) => index % Math.max(1, Math.ceil(entries.length / (conifer ? 100 : 60))) === 0)
     .map(({ node }, index) => ({
       position: node.position,
-      radius: resolvedStyle === "cypress" ? { x: .96 * scale, y: 1.28 * scale, z: .96 * scale } : resolvedStyle === "pine" ? { x: .96 * scale, y: .54 * scale, z: .96 * scale } : { x: 1.18 * scale, y: .82 * scale, z: 1.08 * scale },
+      radius: resolvedStyle === "cypress" ? { x: .48 * scale, y: .7 * scale, z: .48 * scale } : resolvedStyle === "pine" ? { x: .65 * scale, y: .26 * scale, z: .65 * scale } : { x: 1.02 * scale, y: .68 * scale, z: .96 * scale },
       phase: hash01(seed, index, 251),
     }));
   return {

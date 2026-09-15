@@ -13,6 +13,26 @@ const manifest = (chunks: WorldChunkDescriptor[]): WorldRegionManifest => ({ ver
 describe("world chunk spatial streaming", () => {
   const region = manifest(Array.from({ length: 16 }, (_, index) => chunk(index % 4, Math.floor(index / 4))));
 
+  it("budgets actual uploads and waits for presentation before revealing", () => {
+    const visibility=computeWorldVisibility({manifest:region,cameraPosition:{x:8,y:8,z:8},cameraTarget:{x:32,y:0,z:32},quality:"balanced"});
+    const controller=new WorldChunkStreamingController();controller.update(region,visibility,0);
+    let clock=0;
+    const uploaded=controller.takeUploads(8,4,()=>clock,()=>{clock+=6;});
+    expect(uploaded).toHaveLength(1);
+    expect(controller.isResident(uploaded[0])).toBe(true);
+    expect(controller.isPresented(uploaded[0])).toBe(false);
+    controller.markPresented(uploaded);expect(controller.isPresented(uploaded[0])).toBe(true);
+    controller.reset();controller.markPresented(uploaded);expect(controller.isPresented(uploaded[0])).toBe(false);
+  });
+
+  it("rolls back failed uploads so a retry cannot expose an incomplete tile",()=>{
+    const visibility=computeWorldVisibility({manifest:region,cameraPosition:{x:8,y:8,z:8},cameraTarget:{x:32,y:0,z:32},quality:"balanced"});
+    const controller=new WorldChunkStreamingController();controller.update(region,visibility,0);
+    expect(()=>controller.takeUploads(1,4,()=>0,()=>{throw new Error("Upload failed");})).toThrow("Upload failed");
+    expect(controller.snapshot().some(s=>s.resident)).toBe(false);
+    expect(controller.takeUploads(1,4,()=>0)).toHaveLength(1);
+  });
+
   it("uses conservative quadtree candidates without losing nearby chunks", () => {
     const candidates = queryWorldQuadtree(region, { x: 8, y: 8, z: 8 }, { x: 32, y: 0, z: 32 });
     expect(candidates.some((entry) => entry.id === "chunk-0-0")).toBe(true);
@@ -83,6 +103,7 @@ describe("streaming world visibility", () => {
       cameraTarget: { x: 0, y: 0, z: 0 },
       quality: "balanced",
       overview: true,
+      interiorChunkId: chunks[0].id,
     });
     expect(visible.visibleChunkIds.size).toBe(chunks.length);
   });

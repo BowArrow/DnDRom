@@ -15,6 +15,7 @@ export interface GenerationJob {
   updatedAt: number;
   detail?: string;
   reportedByEngine?: boolean;
+  indeterminate?: boolean;
 }
 
 const STORAGE_KEY = "dndrom.generationJobs.v1";

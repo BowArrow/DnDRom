@@ -2,6 +2,7 @@ import type { WorldBlueprintV1 } from "./types";
 import { compileWorldBlueprint, type CompiledWorld } from "./worldForge";
 
 export async function compileWorldBlueprintAsync(blueprint: WorldBlueprintV1, signal?: AbortSignal): Promise<CompiledWorld> {
+  signal?.throwIfAborted();
   if (typeof Worker === "undefined" || import.meta.env.MODE === "test") return compileWorldBlueprint(blueprint);
   return await new Promise<CompiledWorld>((resolve, reject) => {
     const worker = new Worker(new URL("./worldForgeWorker.ts", import.meta.url), { type: "module", name: "DnDRom world compiler" });

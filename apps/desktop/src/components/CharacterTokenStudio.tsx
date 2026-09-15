@@ -11,6 +11,7 @@ import { clampMiniatureFaces, DEFAULT_MINIATURE_FACES, DEFAULT_MINIATURE_PRECLUS
 import { useCampaignStore } from "../state/campaignStore";
 import { selectMiniatureLibrary } from "../state/selectors";
 import { TokenModelPreview } from "./TokenModelPreview";
+import { resolveBasePlateAssetId } from "../domain/baseplates";
 import { importCharacterFile, type CharacterImportResult } from "../importers/characterImport";
 import { GenerationProgress, type GenerationProgressView } from "./GenerationProgress";
 import { SketchPaintStudio } from "./SketchPaintStudio";
@@ -86,6 +87,10 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
   const characters = useCampaignStore((state) => state.campaign.characters);
   const campaignTokenAssets = useCampaignStore((state) => state.campaign.tokenAssets ?? []);
   const tokenAssets = useCampaignStore(selectMiniatureLibrary);
+  const basePlateCampaign = useCampaignStore(state => state.campaign);
+  const basePlateLibrary = useCampaignStore(state => state.basePlateLibrary);
+  const scenicProps = useCampaignStore(state => state.propLibrary);
+  const scenicMaterials = useCampaignStore(state => state.materialLibrary);
   const endpoint = useCampaignStore((state) => resolveCharacterComfyEndpoint(state.campaign.settings?.comfyUiEndpoint));
   const addTokenAsset = useCampaignStore((state) => state.addTokenAsset);
   const addCharacter = useCampaignStore((state) => state.addCharacter);
@@ -808,6 +813,9 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
   }, [draftFilesReady, model, savedDraft?.modelName]);
 
   const activeTokenState = tokenStates.find((state) => state.id === activeStateId) ?? tokenStates[0];
+  const baseToken = tokenAssets.find(token => token.id === savedAssetId);
+  const assignedBaseId = baseToken ? resolveBasePlateAssetId({campaign:basePlateCampaign,scene:basePlateCampaign.scenes?.find(scene => scene.id === basePlateCampaign.activeSceneId),token:baseToken,characterId,entity:{tokenStateId:activeTokenState?.id} as import('../domain/types').MapEntity}) : undefined;
+  const assignedBase = basePlateLibrary.find(base => base.id === assignedBaseId);
   const activeTokenStateIndex = tokenStates.indexOf(activeTokenState);
   const previewModel = activeTokenStateIndex === 0 ? model : activeTokenState?.model;
   const activeRig = activeTokenState?.riggedModel ?? (activeTokenStateIndex === 0 ? riggedModel : null);
@@ -817,7 +825,7 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
     setRigWorkflowStep(activeRig ? 2 : 1);
   }, [activeStateId, activeRig]);
 
-  if (basePlateStudioOpen) return <BasePlateStudio model={previewModel ?? null} tokenId={savedAssetId} characterId={characterId} formId={activeTokenState?.formId ?? activeTokenState?.id} characterName={name || "Untitled miniature"} kind={kind} shape={baseShape} baseColor={baseColor} accentColor={accentColor} footprint={footprint} modelScale={modelScale} placementScale={placementScale} lighting={previewLighting} onClose={() => setBasePlateStudioOpen(false)} onNotify={onNotify} />;
+  if (basePlateStudioOpen) return <BasePlateStudio initialBasePlate={assignedBase} model={previewModel ?? null} tokenId={savedAssetId} characterId={characterId} formId={activeTokenState?.formId ?? activeTokenState?.id} characterName={name || "Untitled miniature"} kind={kind} shape={baseShape} baseColor={baseColor} accentColor={accentColor} footprint={footprint} modelScale={modelScale} placementScale={placementScale} lighting={previewLighting} onClose={() => setBasePlateStudioOpen(false)} onNotify={onNotify} />;
 
   return (
           <section className="creator-workspace-page token-studio-modal" aria-label="Character Forge">
@@ -832,9 +840,11 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
                 <div className="token-role-tabs" role="group" aria-label="Token role">
                   {(["player", "enemy", "boss"] as TokenKind[]).map((entry) => <button key={entry} className={kind === entry ? "active" : ""} onClick={() => applyKind(entry)}>{entry}</button>)}
                 </div>
+                <details className="workspace-disclosure"><summary>Character sheet</summary>
                 <div className="sheet-attachment-box"><label className="field-label">Attached character sheet<select value={characterId} onChange={(event) => { const value = event.target.value; setCharacterId(value); if (savedAssetId) linkTokenCharacter(savedAssetId, value || null); }}><option value="">No attached sheet</option>{characters.map((character) => <option value={character.id} key={character.id}>{character.name} · {character.role ?? "player"}</option>)}</select></label><div><button onClick={createAndAttachSheet}><Plus size={13} /> Create sheet</button><button onClick={() => sheetFileRef.current?.click()} disabled={importingSheet}><Upload size={13} /> {importingSheet ? "Reading…" : "Import PDF/JSON"}</button>{characterId && <button onClick={() => onOpenSheet(characterId)}>Open sheet</button>}<input ref={sheetFileRef} hidden type="file" accept="application/pdf,.pdf,.json" onChange={(event) => void importSheet(event.target.files?.[0])} /></div><small>This sheet link belongs to the current campaign, so the same miniature can use another sheet elsewhere.</small></div>
                 {sheetImport && <section className="inline-sheet-review"><div><strong>Review {sheetImport.character.name}</strong><small>{sheetImport.fields.length} extracted fields · nothing is attached until accepted</small></div><div className="imported-fields">{sheetImport.fields.slice(0, 8).map((field) => <span key={field.field}><small>{field.field}</small><strong>{field.value}</strong><em>{Math.round(field.confidence * 100)}%</em></span>)}</div>{sheetImport.warnings.map((warning) => <p key={warning}>{warning}</p>)}<div><button onClick={() => setSheetImport(null)}>Cancel</button><button className="primary-button" onClick={acceptImportedSheet}>Accept & attach</button></div></section>}
 
+                </details>
                 <label className={`token-dropzone ${drawing ? "has-file" : ""}`} aria-label="Character source artwork">
                   {drawingUrl ? <img src={drawingUrl} alt="Drawing preview" /> : <ImagePlus size={28} />}
                   <span><strong>{drawing?.name ?? "Choose character drawing"}</strong><small>Clean single subject · front or 3/4 view · PNG/JPEG/WebP</small></span>
@@ -852,7 +862,7 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
                 </div>
                 <div className="automatic-setup-note"><Download size={14} /><span><strong>No manual setup</strong><small>Generate once. DnDRom downloads, verifies, installs, and starts the private local tools, then continues automatically.</small></span></div>
                 <label className="workflow-picker optional-workflow"><Upload size={15} /><span>Optional workflow override</span><small>{workflowName}</small><input type="file" accept="application/json,.json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void loadWorkflow(file); }} /></label>
-                <label className="field-label">Gameplay mesh target <span>{targetFaces.toLocaleString()} faces · {DEFAULT_MINIATURE_PRECLUSTER_MAX_VERTICES.toLocaleString()}-vertex detail remesh before the final reduction</span><input type="range" min={MIN_MINIATURE_FACES} max={MAX_MINIATURE_FACES} step="1000" value={targetFaces} onChange={(event) => setTargetFaces(clampMiniatureFaces(Number(event.target.value)))} /></label>
+                <label className="field-label mesh-target-field"><strong>Gameplay mesh target</strong><output>{targetFaces.toLocaleString()} faces</output><small>{DEFAULT_MINIATURE_PRECLUSTER_MAX_VERTICES.toLocaleString()}-vertex detail remesh before the final reduction</small><input aria-label="Gameplay mesh target" type="range" min={MIN_MINIATURE_FACES} max={MAX_MINIATURE_FACES} step="1000" value={targetFaces} onChange={(event) => setTargetFaces(clampMiniatureFaces(Number(event.target.value)))} /></label>
                 <button className="primary-button" onClick={() => void generate()} disabled={working || !drawing || !workflow}>{working ? <LoaderCircle className="spin" size={17} /> : <Box size={17} />}{working ? "Generating locally…" : savedAssetId ? "Generate as a new character" : "Generate character now"}</button>
                 <div className="token-or-divider"><span>or</span></div>
                 <label className="workflow-picker"><Upload size={15} /><span>{model ? model.name : "Import an existing GLB"}</span><input type="file" accept=".glb,model/gltf-binary" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; if (model && tokenStates[0]) replaceStateModel(tokenStates[0].id, file); else { setSavedAssetId(null); setModel(file); } event.currentTarget.value = ""; }} /></label>
@@ -861,7 +871,7 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
               <main className="creator-stage token-preview-stage" aria-label="Character 3D preview">
                 {studioMode === "paint" && drawing
                   ? <SketchPaintStudio source={drawing} originalSource={originalDrawing} onAiAssist={assistPaint} onCancel={() => setStudioMode("model")} onApply={(file) => { setDrawing(file); setStudioMode("model"); onNotify("Painted drawing saved as a new draft revision. Your upload remains protected.", "success"); }} />
-                  : <><TokenModelPreview model={previewModel ?? null} kind={kind} shape={baseShape} baseColor={baseColor} accentColor={accentColor} footprint={footprint} modelScale={modelScale} placementScale={placementScale} lighting={previewLighting} />
+                  : <><TokenModelPreview basePlate={assignedBase} propAssets={scenicProps} materialAssets={scenicMaterials} model={previewModel ?? null} kind={kind} shape={baseShape} baseColor={baseColor} accentColor={accentColor} footprint={footprint} modelScale={modelScale} placementScale={placementScale} lighting={previewLighting} />
                     <div className="stage-caption"><strong>{name || "Untitled miniature"} · {activeTokenState?.name ?? "Default"}</strong><span>Drag-free turntable · PBR materials · live three-point lighting</span></div>
                     {generationProgress && <GenerationProgress value={generationProgress} label="Character generation progress" onCancel={activeEditAbort.current ? () => activeEditAbort.current?.abort() : undefined} />}</>}
               </main>
@@ -876,11 +886,14 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
                 <label className="field-label">Default tabletop scale <span>{placementScale.toFixed(2)}×</span><input type="range" min="0.25" max="3" step="0.05" value={placementScale} onChange={(event) => setPlacementScale(Number(event.target.value))} /></label>
                 <button className={`primary-button add-token-button ${savedAssetId ? "saved" : ""}`} onClick={addToLibrary} disabled={working || !model || !name.trim()}><ShieldPlus size={17} /> {savedAssetId ? "Update saved miniature" : "Add imported model to library"}</button>
                 {savedAssetId && <button className="forge-place-button" onClick={onBack}><Check size={15} /> Return to Build with miniature selected</button>}
+                <details className="workspace-disclosure"><summary>Restyle miniature</summary>
                 <div className="sidebar-section-heading"><Sparkles size={14} /><span><strong>Prompt-edit current 3D style</strong><small>Preserves the mesh and creates a restore point</small></span></div>
                 <label className="field-label">Describe the change<textarea rows={4} value={editPrompt} onChange={(event) => setEditPrompt(event.target.value)} placeholder="Add a weathered red cloak and silver shoulder armor; keep the same face and pose" /></label>
                 <label className="field-label">Change strength <span>{Math.round(editStrength * 100)}%</span><input type="range" min="0.2" max="0.7" step="0.01" value={editStrength} onChange={(event) => setEditStrength(Number(event.target.value))} /></label>
                 <button className="primary-button magical-button" onClick={() => void promptEditCharacter()} disabled={working || !drawing || !previewModel || !editPrompt.trim()}><Sparkles size={16} /> AI edit current 3D style</button>
                 {previousRevision && <button className="secondary-generator-button restore-revision-button" onClick={restorePreviousRevision} disabled={working}><RotateCcw size={15} /> Restore previous revision</button>}
+                </details>
+                <details className="workspace-disclosure"><summary>Rigging, animation & presentation</summary>
                 <div className="sidebar-section-heading rigging-heading"><Bone size={14} /><span><strong>Skeleton & skinning</strong><small>Local MIA / UniRig workflow</small></span></div>
                 <ol className={`rig-pipeline-steps active-step-${rigWorkflowStep}`} aria-label="Character rigging pipeline">
                   {([
@@ -903,6 +916,7 @@ export function CharacterTokenStudio({ onNotify, onBack, onOpenSheet, requestedT
                 <label className="field-label">Fill light <span>{previewLighting.fillIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={previewLighting.fillIntensity} onChange={(event) => setPreviewLighting((value) => ({ ...value, fillIntensity: Number(event.target.value) }))} /></label>
                 <label className="field-label">Rim light <span>{previewLighting.rimIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={previewLighting.rimIntensity} onChange={(event) => setPreviewLighting((value) => ({ ...value, rimIntensity: Number(event.target.value) }))} /></label>
                 <div className="lighting-toggle-grid compact"><label><input type="checkbox" checked={previewLighting.ssao} onChange={(event) => setPreviewLighting((value) => ({ ...value, ssao: event.target.checked }))} /><span>SSAO<small>Contact shadows</small></span></label><label><input type="checkbox" checked={previewLighting.bloom} onChange={(event) => setPreviewLighting((value) => ({ ...value, bloom: event.target.checked }))} /><span>Bloom<small>Emissive glow</small></span></label><label><input type="checkbox" checked={previewLighting.depthOfField} onChange={(event) => setPreviewLighting((value) => ({ ...value, depthOfField: event.target.checked }))} /><span>Tilt-shift<small>Miniature focus</small></span></label></div>
+                </details>
               </aside>
             </div>
 

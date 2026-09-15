@@ -23,7 +23,7 @@ const materialContext: Record<MaterialTarget, string> = {
 
 export function compileMaterialPrompt(description: string, target: MaterialTarget): string {
   const clean = validatePropPrompt(description);
-  return `${clean}. ${materialContext[target]}. Flat albedo only, even neutral illumination, edge-to-edge texture, physically plausible micro-detail, no objects, no perspective, no shadows, no highlights, no ambient occlusion baked into color, no border, no vignette, no text. Opposite edges must join perfectly.`;
+  return `Seamless PBR texture sheet. Extreme close-up of a flat surface filling the entire square image: ${clean}. ${materialContext[target]}. Flat albedo only, even neutral illumination, edge-to-edge texture, physically plausible micro-detail, no objects, no buildings, no scenery, no perspective, no shadows, no highlights, no ambient occlusion baked into color, no border, no vignette, no text. Opposite edges must join perfectly.`;
 }
 
 export function promptAttribution(provider: "sana-local" | "krea-local" | "krea-cloud"): string {

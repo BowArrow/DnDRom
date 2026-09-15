@@ -49,4 +49,11 @@ describe("gameplay-aware depth of field", () => {
     expect(source).toContain("rig.destroyed = true;");
     expect(source).toContain("rig.cameraFrame = null;");
   });
+
+  it("routes legacy and Forge interiors through the stable direct-forward path", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/rendering/lightingEngine.ts"), "utf8");
+    expect(source).toContain("const generatedInterior = isInteriorMap(map)");
+    expect(source).toContain("frame.enabled = rig.cameraFrameRequested");
+    expect(source).toContain('"disabled-interior"');
+  });
 });

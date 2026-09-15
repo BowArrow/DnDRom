@@ -129,7 +129,7 @@ const fetchWithTimeout = async (url: string, init: RequestInit = {}, timeoutMs =
   if (init.signal?.aborted) abortFromCaller();
   else init.signal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+      const response = await fetch(url, { ...init, signal: controller.signal, redirect: "error" });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       let reason = detail;
@@ -566,7 +566,7 @@ export async function releaseComfyMemory(baseUrl: string): Promise<void> {
  * best-effort because cancellation must never mask the original job error. */
 export async function cancelComfyPrompt(baseUrl: string, promptId: string): Promise<void> {
   await Promise.allSettled([
-    fetchWithTimeout(endpoint(baseUrl, "/interrupt"), { method: "POST" }, 15_000),
+    fetchWithTimeout(endpoint(baseUrl, "/interrupt"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt_id: promptId }) }, 15_000),
     fetchWithTimeout(endpoint(baseUrl, "/queue"), {
       method: "POST",
       headers: { "content-type": "application/json" },

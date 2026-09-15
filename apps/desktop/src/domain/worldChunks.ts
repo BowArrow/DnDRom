@@ -100,9 +100,13 @@ const nodeCouldBeVisible = (node: QuadtreeNode, camera: Vec3, target: Vec3, maxi
   return true;
 };
 
+const quadtreeCache = new WeakMap<WorldRegionManifest, QuadtreeNode>();
+
 export function queryWorldQuadtree(manifest: WorldRegionManifest, camera: Vec3, target: Vec3, maximumDistance = manifest.chunkSize * 9): WorldChunkDescriptor[] {
   if (!manifest.chunks.length) return [];
-  const result: WorldChunkDescriptor[] = [], pending = [buildQuadtreeNode(manifest.chunks)];
+  let root = quadtreeCache.get(manifest);
+  if (!root) { root = buildQuadtreeNode(manifest.chunks); quadtreeCache.set(manifest, root); }
+  const result: WorldChunkDescriptor[] = [], pending = [root];
   while (pending.length) {
     const node = pending.pop()!;
     if (!nodeCouldBeVisible(node, camera, target, maximumDistance)) continue;
@@ -141,7 +145,10 @@ export function computeWorldVisibility(input: WorldVisibilityInput): WorldVisibi
   const { manifest, cameraPosition, cameraTarget } = input;
   const maximumDistance = input.farClip ?? manifest.chunkSize * 9;
   const verticalFov = input.verticalFovDegrees ?? 52, aspect = input.aspectRatio ?? 16 / 9;
-  const portalSet = input.interiorChunkId ? portalVisible(manifest, input.interiorChunkId) : null;
+  // The Forge overview is an editor-wide view, not the player's current room.
+  // Applying portal traversal here punched visible holes out of the authored
+  // draft even though the camera could still see those rooms.
+  const portalSet = !input.overview && input.interiorChunkId ? portalVisible(manifest, input.interiorChunkId) : null;
   const visible = new Set<string>();
   const preload = new Set<string>();
   const lodByChunkId = new Map<string, WorldChunkLodLevel>();
@@ -190,6 +197,7 @@ export function lightInfluencesVisibleChunks(position: Vec3, range: number, mani
 export class WorldChunkStreamingController {
   private states = new Map<string, WorldChunkRuntimeState>();
   private queue: string[] = [];
+  private presented = new Set<string>();
   constructor(private readonly evictionDelayMs = 5_000) {}
 
   update(manifest: WorldRegionManifest, visibility: WorldVisibilitySet, now: number): string[] {
@@ -207,26 +215,34 @@ export class WorldChunkStreamingController {
     }
     const evicted: string[] = [];
     for (const state of this.states.values()) if (state.resident && !requested.has(state.chunkId) && now - Math.max(state.lastVisibleAt, state.lastRequestedAt) >= this.evictionDelayMs) {
-      state.resident = false; state.residentLod = undefined; evicted.push(state.chunkId);
+      state.resident = false; state.residentLod = undefined; this.presented.delete(state.chunkId); evicted.push(state.chunkId);
     }
     this.queue = this.queue.filter((id) => requested.has(id));
+    const priorities = new Map(manifest.chunks.map(chunk => [chunk.id, Math.hypot(center(chunk).x, center(chunk).z)]));
+    this.queue.sort((a,b) => (priorities.get(a) ?? Infinity) - (priorities.get(b) ?? Infinity));
     return evicted;
   }
 
-  takeUploads(maxChunks = 1, timeBudgetMs = 4, clock: () => number = () => performance.now()): string[] {
+  takeUploads(maxChunks = 1, timeBudgetMs = 4, clock: () => number = () => performance.now(), upload?: (id:string) => void): string[] {
     const started = clock(), loaded: string[] = [];
     while (this.queue.length && loaded.length < maxChunks && clock() - started <= timeBudgetMs) {
       const id = this.queue.shift()!, state = this.states.get(id);
       if (!state) continue;
-      state.resident = true; state.residentLod = state.requestedLod; loaded.push(id);
+      const previous = { resident: state.resident, lod: state.residentLod };
+      state.resident = true; state.residentLod = state.requestedLod;
+      try { upload?.(id); loaded.push(id); }
+      catch (error) { this.presented.delete(id); state.resident = previous.resident; state.residentLod = previous.lod; this.queue.unshift(id); throw error; }
     }
     return loaded;
   }
 
   isResident(chunkId: string): boolean { return this.states.get(chunkId)?.resident ?? false; }
+  /** Called after a rendered frame, never merely when a job enters the queue. */
+  markPresented(chunkIds: readonly string[]): void { for(const id of chunkIds) if(this.isResident(id)) this.presented.add(id); }
+  isPresented(chunkId:string):boolean { return this.isResident(chunkId) && this.presented.has(chunkId); }
   residentLod(chunkId: string): WorldChunkLodLevel | undefined { return this.states.get(chunkId)?.residentLod; }
   snapshot(): WorldChunkRuntimeState[] { return [...this.states.values()].map((state) => ({ ...state })); }
-  reset(): void { this.states.clear(); this.queue = []; }
+  reset(): void { this.states.clear(); this.queue = []; this.presented.clear(); }
 }
 
 export function shouldRenderWorldEntity(chunkId: string | undefined, visibility: WorldVisibilitySet | null): boolean {

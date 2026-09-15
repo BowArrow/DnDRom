@@ -55,7 +55,8 @@ const loadTexture = async (device: pc.GraphicsDevice, blob: Blob, name: string, 
   try {
     const image = new Image(); image.decoding = "async"; image.src = url; await image.decode();
     const texture = new pc.Texture(device, { name, width: image.naturalWidth, height: image.naturalHeight, format: srgb ? pc.PIXELFORMAT_SRGBA8 : pc.PIXELFORMAT_RGBA8, mipmaps: true, minFilter: pc.FILTER_LINEAR_MIPMAP_LINEAR, magFilter: pc.FILTER_LINEAR });
-    texture.addressU = pc.ADDRESS_REPEAT; texture.addressV = pc.ADDRESS_REPEAT; texture.anisotropy = 8; texture.setSource(image); return texture;
+    texture.addressU = pc.ADDRESS_REPEAT; texture.addressV = pc.ADDRESS_REPEAT; texture.anisotropy = 8;
+    (texture as pc.Texture & { setSource(source: ImageBitmap): void }).setSource(await createImageBitmap(image)); return texture;
   } finally { URL.revokeObjectURL(url); }
 };
 
@@ -68,13 +69,24 @@ export function loadMaterialAssetMaps(app: pc.Application, asset: MaterialAsset)
 
 export async function applyMaterialAsset(app: pc.Application, root: pc.Entity, asset: MaterialAsset): Promise<boolean> {
   const maps = await loadMaterialAssetMaps(app, asset);
+  if (!root.parent) return false;
   if (!maps.albedo) { root.tags.add("missing-material-binary"); return false; }
   const radians = asset.rotation * Math.PI / 180, tiling = Math.max(.01, asset.scale);
   for (const component of root.findComponents("render") as pc.RenderComponent[]) for (const mesh of component.meshInstances) {
     const material = mesh.material instanceof pc.StandardMaterial ? mesh.material.clone() : new pc.StandardMaterial();
     material.name = `${asset.name} · ${asset.projection}`;
+    material.diffuse.set(1, 1, 1); material.diffuseVertexColor = false;
+    material.heightMap = null; material.heightMapFactor = 0;
     material.diffuseMap = maps.albedo; material.normalMap = maps.normal ?? null; material.glossMap = maps.roughness ?? null; material.metalnessMap = maps.metallic ?? null; material.aoMap = maps.ambientOcclusion ?? null;
-    material.useMetalness = true; material.metalness = asset.metallic; material.gloss = 1 - asset.roughness; material.glossInvert = true; material.bumpiness = asset.normalStrength;
+    material.useMetalness = true; material.metalness = asset.metallic;
+    material.gloss = maps.roughness ? asset.roughness : 1 - asset.roughness; material.glossInvert = Boolean(maps.roughness); material.bumpiness = asset.normalStrength;
+    material.glossMapChannel = "r"; material.metalnessMapChannel = "r"; material.aoMapChannel = "r";
+    // Keep procedural wind/vertex motion, but let the newly authored surface
+    // own its albedo and PBR response on terrain as well as buildings.
+    for (const language of [pc.SHADERLANGUAGE_GLSL, pc.SHADERLANGUAGE_WGSL]) {
+      const chunks = material.getShaderChunks(language);
+      for (const name of ["diffusePS", "normalMapPS", "glossPS", "metalnessPS", "aoPS"]) chunks.delete(name);
+    }
     material.diffuseMapTiling.set(tiling, tiling); material.diffuseMapOffset.set((1 - Math.cos(radians)) * .5, Math.sin(radians) * .5);
     material.normalMapTiling.copy(material.diffuseMapTiling); material.glossMapTiling.copy(material.diffuseMapTiling); material.metalnessMapTiling.copy(material.diffuseMapTiling); material.aoMapTiling.copy(material.diffuseMapTiling);
     if (asset.projection === "triplanar" && maps.normal && maps.roughness && maps.metallic && maps.ambientOcclusion) {
@@ -93,6 +105,7 @@ export async function applyMaterialAsset(app: pc.Application, root: pc.Entity, a
       material.setParameter("dndrom_metallic", asset.metallic);
     }
     material.update(); mesh.material = material;
+    root.once("destroy", () => material.destroy());
   }
   root.tags.add(`material-projection:${asset.projection}`); return true;
 }

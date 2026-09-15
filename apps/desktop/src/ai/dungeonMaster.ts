@@ -1,3 +1,4 @@
+import { prepareLanguageSettings } from "./managedLanguage";
 import { z } from "zod";
 import { extractJson, streamLocalChat } from "./openAiClient";
 import type { AbilityKey, Campaign, Character, DmResponse, RollRequest } from "../domain/types";
@@ -88,6 +89,9 @@ const summarizeCampaignForModel = (campaign: Campaign, character: Character): st
   scene: {
     name: campaign.map.name,
     theme: campaign.map.theme,
+    mapLevel: campaign.map.journey?.level,
+    currentBuilding: campaign.map.journey?.interiors?.find(interior => interior.entityId === campaign.map.journey?.activeBuildingId),
+    pointsOfInterest: campaign.map.pointsOfInterest,
     visibleEntities: campaign.map.entities.filter((entity) => !entity.hidden).slice(0, 80).map((entity) => ({ name: entity.name, asset: entity.assetId, position: entity.position, notes: entity.notes })),
   },
   character: {
@@ -192,6 +196,7 @@ export async function runDungeonMaster(
   const character = campaign.characters.find((entry) => entry.id === campaign.activeCharacterId) ?? campaign.characters[0];
   if (!character) throw new Error("Create a character before asking the Dungeon Master to resolve an action.");
   const check = classifyOfflineCheck(action);
+  campaign = { ...campaign, settings: await prepareLanguageSettings(campaign.settings, signal) };
   if (campaign.settings.localAiEndpoint.trim()) {
     try {
       const result = await runLocalAi(campaign, character, action, signal, onNarrationChunk);

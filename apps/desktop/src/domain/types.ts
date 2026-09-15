@@ -133,6 +133,8 @@ export interface AttachmentTransformV2 {
 }
 
 export interface MapEntity {
+  worldAccess?: { entrance: Vec3; anchor: Vec3 };
+  routeMotion?: { points: Vec3[]; speed: number; dwell: number };
   id: string;
   assetId: string;
   name: string;
@@ -143,6 +145,7 @@ export interface MapEntity {
   scale: Vec3;
   tint?: string;
   materialAssetId?: string;
+  materialSlots?: Partial<Record<WorldMaterialRole, string>>;
   /** Per-instance practical-light settings. Scene lights use this without rendering gameplay geometry. */
   light?: PracticalLightBehavior;
   hidden?: boolean;
@@ -169,6 +172,7 @@ export interface MapEntity {
 }
 
 export interface WorldTerrainGeometry {
+  worldSite?:import("./worldSite").WorldSite;
   kind: "terrain";
   seed: number;
   originX: number;
@@ -193,6 +197,16 @@ export interface WorldTerrainGeometry {
     roadWeights?: number[];
     /** Integer one-meter gameplay level nearest each visual sample. */
     terraceLevels?: number[];
+    /** SoilMachine-inspired compact surface sections sampled from the global
+     * layer map. Values are meters except saturation, which is normalized. */
+    soilDepth?: number[];
+    screeDepth?: number[];
+    bedrockExposure?: number[];
+    saturation?: number[];
+    /** Desert-only movable sediment and particle diagnostics. */
+    aeolianSediment?: number[];
+    windPath?: number[];
+    abrasion?: number[];
   };
 }
 
@@ -210,6 +224,9 @@ export interface WorldWaterGeometry {
   depthField?: number[];
   /** Row-major 0..1 bank proximity used by the foam shader. */
   shoreline?: number[];
+  /** Absolute row-major water-surface elevation. This allows independently
+   * elevated filled basins instead of forcing every lake to global sea level. */
+  surfaceHeights?: number[];
   /** Row-major normalized X/Z downstream vectors, two numbers per cell. */
   flowVectors?: number[];
 }
@@ -218,7 +235,17 @@ export interface WorldRibbonGeometry {
   kind: "road-ribbon" | "river-ribbon";
   /** World-space centerline. Short, smoothed spans make curves continuous
    * without storing unrestricted generated mesh data. */
-  paths: Array<Array<{ x: number; y: number; z: number; width: number }>>;
+  paths: Array<Array<{
+    x: number;
+    y: number;
+    z: number;
+    width: number;
+    /** Region-space tangent evaluated before chunk clipping. Keeping it with
+     * the sample prevents adjacent chunks from deriving different bank
+     * frames at the same spline point. */
+    tangentX?: number;
+    tangentZ?: number;
+  }>>;
   surface: "dirt" | "stone" | "wood" | "water";
   bankDepth?: number;
   flowSpeed?: number;
@@ -237,6 +264,8 @@ export interface WorldBuildingFacadeTile {
   offset: number;
   width: number;
   kind: "wall" | "door" | "window";
+  /** Remaining wall fraction; zero is a collapsed opening. */
+  integrity?: number;
 }
 
 /** Compact, rule-derived CGA description. The renderer rebuilds the structural
@@ -248,7 +277,8 @@ export interface WorldBuildingGeometry {
   floors: number;
   floorHeight: number;
   wallThickness: number;
-  roof: "gable" | "hip" | "flat";
+  roof: "gable" | "hip" | "flat" | "ruined";
+  ruinSeed?: number;
   facadeTiles: WorldBuildingFacadeTile[];
   palette: { foundation: string; wall: string; trim: string; roof: string; glass: string; door: string };
 }
@@ -265,6 +295,9 @@ export interface WorldTreeBranch {
  * leaf clusters are presentation hints rebuilt per LOD. */
 export interface WorldTreeGeometry {
   kind: "space-colonized-tree";
+  /** Seeded prototypes are reconstructed once; batches store only placements. */
+  prototypeSeed?: number;
+  instances?: Array<{ x: number; y: number; z: number; rotation: number; scale: number }>;
   style: WorldBiomeSpec["treeStyle"];
   branches: WorldTreeBranch[];
   leafClusters: Array<{ position: Vec3; radius: Vec3; phase: number }>;
@@ -272,7 +305,8 @@ export interface WorldTreeGeometry {
   leafColors: [string, string];
 }
 
-export type WorldProceduralGeometry = WorldTerrainGeometry | WorldWaterGeometry | WorldRibbonGeometry | WorldGroundCoverGeometry | WorldBuildingGeometry | WorldTreeGeometry;
+export interface WorldAssemblyGeometry { kind: "assembly"; recipeId: string; parts: import("./sceneGrammar").ScenePart[] }
+export type WorldProceduralGeometry = WorldTerrainGeometry | WorldWaterGeometry | WorldRibbonGeometry | WorldGroundCoverGeometry | WorldBuildingGeometry | WorldTreeGeometry | WorldAssemblyGeometry;
 
 export type TokenKind = "player" | "enemy" | "boss";
 export type TokenBaseShape = "round" | "square" | "hex";
@@ -364,6 +398,7 @@ export interface BasePlateLayer {
   order: number;
   materialAssetId?: string;
   propAssetId?: string;
+  role?: "base-surface";
   color?: string;
   position: Vec3;
   rotation: Vec3;
@@ -388,6 +423,10 @@ export interface BasePlateRecipe {
   rimColor: string;
   plinthHeight: number;
   surfaceRelief: number;
+  /** Maximum scenic mesh height as a fraction of the base diameter. */
+  sceneryHeightRatio?: number;
+  /** Optional standing position in fractions of the base width. */
+  standingPoint?: { x: number; z: number };
   footClearance: {
     source: "mesh-lowest-12" | "fallback-ellipse" | "manual";
     radius: number;
@@ -639,11 +678,19 @@ export interface WorldBlueprintV1 {
   theme: MapTheme;
   mood: LightingMood;
   biome: WorldBiomeSpec;
+  biomeRegions?: import("./worldGeography").BiomeRegion[];
+  weather?: import("./worldWeather").WorldWeather;
   terrain: WorldTerrainSpec;
+  siteIntent?: import("./worldSite").SiteIntent;
+  site?: import("./worldSite").WorldSite;
+  architecture?: { material: "timber" | "stone"; ruin: number; density: number };
+  composition?: import("./sceneGrammar").SceneComposition;
   zones: WorldZone[];
   assetRequests: WorldAssetRequest[];
   presentation: { background: "none" | "panorama" | "splat"; prompt: string };
 }
+
+export type WorldMaterialRole = "ground" | "masonry" | "timber" | "roof" | "foliage";
 
 export interface WorldChunkBounds {
   min: Vec3;
@@ -676,7 +723,10 @@ export interface WorldChunkDescriptor {
 }
 
 export interface WorldRegionManifest {
+  environment?: import('./sharedWorld').SceneEnvironment;
+  sharedWorld?: import("./sharedWorld").WorldManifest;
   version: 1;
+  site?: import("./worldSite").WorldSite;
   /** Visual compiler revision. Missing means the legacy flat-tile pipeline. */
   generatorRevision?: number;
   blueprintId: string;
@@ -695,7 +745,7 @@ export interface WorldRegionManifest {
   fieldSet?: {
     resolution: number;
     cellSize: number;
-    layers: Array<"elevation" | "filledElevation" | "flowDirection" | "accumulation" | "slope" | "curvature" | "moisture" | "sediment">;
+    layers: Array<"elevation" | "waterMask" | "waterSurface" | "waterDepth" | "filledElevation" | "poolDepth" | "streamMap" | "momentumX" | "momentumZ" | "soilDepth" | "screeDepth" | "bedrockExposure" | "saturation" | "flowDirection" | "accumulation" | "slope" | "curvature" | "moisture" | "sediment" | "aeolianSediment" | "windPath" | "abrasion">;
     erosionPasses: number;
     authority: "global-region";
   };
@@ -784,6 +834,9 @@ export interface WorldGenerationCheckpoint {
 }
 
 export interface GameMap {
+  sharedCacheOmitted?: boolean;
+  weather?: import("./worldWeather").WorldWeather;
+  journey?: import("./worldGeography").WorldJourney;
   id: string;
   name: string;
   theme: MapTheme;
@@ -867,6 +920,9 @@ export interface WorldRoad {
 }
 
 export interface WorldPlan {
+  generationRequests?: import('./sharedWorld').SceneRequest[];
+  generationStyles?: import('./sharedWorld').RegionalStyle[];
+  manifest?: import("./sharedWorld").WorldManifest;
   id: string;
   name: string;
   seed: string;
@@ -1032,9 +1088,12 @@ export interface CampaignSettings {
   tone: "heroic" | "dark" | "whimsical" | "mystery";
   contentIntensity: "gentle" | "standard" | "gritty";
   lines: string[];
+  localAiRuntime?: "managed" | "external" | "disabled";
   localAiEndpoint: string;
   localAiModel: string;
   whisperEndpoint: string;
+  localTtsEndpoint?: string;
+  localTtsVoice?: string;
   speakDmResponses: boolean;
   useLocalAiForMaps: boolean;
   comfyUiEndpoint: string;
@@ -1067,6 +1126,7 @@ export interface Campaign {
   storyThreads: StoryThread[];
   campaignPlan?: CampaignPlan;
   world?: WorldPlan;
+  archivedWorlds?: WorldPlan[];
   activeLocationId?: string;
   events: CampaignEvent[];
   revision: number;

@@ -99,7 +99,8 @@ export function basePlateDependencies(asset: BasePlateAsset): { propAssetIds: st
 const assigned = (map: BasePlateAssignmentMap | undefined, subject: string): string | undefined => map?.[subject as keyof BasePlateAssignmentMap];
 
 export function resolveBasePlateAssetId(options: { campaign: Campaign; scene?: CampaignScene; token: TokenAsset; entity?: MapEntity; characterId?: string }): string | undefined {
-  const { campaign, scene, token, entity, characterId } = options;
+  const { campaign, scene, token, entity } = options;
+  const characterId = options.characterId || undefined;
   return (entity && assigned(scene?.basePlateAssignments, `entity:${entity.id}`))
     ?? (characterId && assigned(scene?.basePlateAssignments, `character:${characterId}`))
     ?? assigned(scene?.basePlateAssignments, `token:${token.id}`)

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, Download, Link2, LogIn, Radio, RotateCcw, Save, Server, Settings2, Unplug, Upload, Wifi, WifiOff } from "lucide-react";
 import { testLocalAi } from "../ai/openAiClient";
+import { prepareLanguageSettings } from "../ai/managedLanguage";
 import { disconnectSession, hostSession, joinSession, setSessionNoticeHandler } from "../network/runtime";
 import { exportCampaign, importCampaign, saveCampaignNative } from "../persistence/campaignFiles";
 import { useCampaignStore } from "../state/campaignStore";
@@ -18,6 +19,7 @@ export function SessionPanel({ onNotify }: SessionPanelProps) {
   const resetCampaign = useCampaignStore((state) => state.resetCampaign);
   const markSaved = useCampaignStore((state) => state.markSaved);
   const [testingAi, setTestingAi] = useState(false);
+  const [exportingUnreal, setExportingUnreal] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [serverUrl, setServerUrl] = useState("ws://127.0.0.1:8787");
   const [roomCode, setRoomCode] = useState("");
@@ -43,6 +45,16 @@ export function SessionPanel({ onNotify }: SessionPanelProps) {
     }
   };
 
+  const exportUnreal = async () => {
+    setExportingUnreal(true);
+    try {
+      const { downloadUnrealScene } = await import("../migration/exportUnreal");
+      const warnings = await downloadUnrealScene(campaign);
+      onNotify(warnings ? `Unreal scene exported with ${warnings} compatibility notices. Details and original campaign are included in the file.` : "Unreal scene exported.", warnings ? "warning" : "success");
+    } catch (error) { onNotify(error instanceof Error ? error.message : "Unreal export failed", "error"); }
+    finally { setExportingUnreal(false); }
+  };
+
   const loadFile = async (file?: File) => {
     if (!file) return;
     try {
@@ -58,7 +70,8 @@ export function SessionPanel({ onNotify }: SessionPanelProps) {
   const testAi = async () => {
     setTestingAi(true);
     try {
-      const result = await testLocalAi(campaign.settings.localAiEndpoint, campaign.settings.localAiModel);
+      const settings = await prepareLanguageSettings(campaign.settings);
+      const result = await testLocalAi(settings.localAiEndpoint, settings.localAiModel);
       onNotify(`Local AI responded in ${result.latencyMs} ms.`, "success");
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Local AI connection failed", "error");
@@ -103,6 +116,7 @@ export function SessionPanel({ onNotify }: SessionPanelProps) {
         <div className="file-actions">
           <button className="primary-button" onClick={nativeSave}><Save size={15} /> Save campaign</button>
           <button onClick={() => exportCampaign(campaign)}><Download size={15} /> Export</button>
+          <button onClick={exportUnreal} disabled={exportingUnreal}><Download size={15} /> {exportingUnreal ? "Exporting scene…" : "Export to Unreal"}</button>
           <button onClick={() => fileRef.current?.click()}><Upload size={15} /> Import</button>
           <input ref={fileRef} hidden type="file" accept=".dndrom,application/json" onChange={(event) => loadFile(event.target.files?.[0])} />
         </div>
@@ -117,11 +131,16 @@ export function SessionPanel({ onNotify }: SessionPanelProps) {
 
       <section className="settings-section">
         <div className="section-heading"><Radio size={16} /><div><strong>Local AI runtime</strong><small>OpenAI-compatible llama.cpp endpoint</small></div></div>
-        <label className="field-label">Loopback endpoint<input value={campaign.settings.localAiEndpoint} onChange={(event) => updateSettings({ localAiEndpoint: event.target.value })} placeholder="http://127.0.0.1:8080/v1" /></label>
+        <label className="field-label">Language model<select value={campaign.settings.localAiRuntime ?? "managed"} onChange={(event) => updateSettings({ localAiRuntime: event.target.value as "managed" | "external" | "disabled" })}><option value="managed">Managed by DnDRom</option><option value="external">Advanced: local endpoint</option><option value="disabled">Procedural only</option></select></label>
+        {(campaign.settings.localAiRuntime ?? "managed") === "managed" && <p>DnDRom downloads and starts its own local model when needed. First setup downloads approximately 4.7 GB. No separate AI application is required.</p>}
+        {campaign.settings.localAiRuntime === "external" && <><label className="field-label">Loopback endpoint<input value={campaign.settings.localAiEndpoint} onChange={(event) => updateSettings({ localAiEndpoint: event.target.value })} placeholder="http://127.0.0.1:8080/v1" /></label>
         <label className="field-label">Model alias<input value={campaign.settings.localAiModel} onChange={(event) => updateSettings({ localAiModel: event.target.value })} /></label>
-        <button className="connection-test" onClick={testAi} disabled={testingAi || !campaign.settings.localAiEndpoint}><Link2 size={15} />{testingAi ? "Testing…" : "Test local model"}</button>
-        <label className="toggle-row"><span><strong>Use AI for map planning</strong><small>Falls back to the offline generator</small></span><input type="checkbox" checked={campaign.settings.useLocalAiForMaps} onChange={(event) => updateSettings({ useLocalAiForMaps: event.target.checked })} /></label>
-        <label className="toggle-row"><span><strong>Speak DM responses</strong><small>Uses local system speech until Kokoro is installed</small></span><input type="checkbox" checked={campaign.settings.speakDmResponses} onChange={(event) => updateSettings({ speakDmResponses: event.target.checked })} /></label>
+        <label className="toggle-row"><span><strong>Use AI for map planning</strong><small>Falls back to the offline generator</small></span><input type="checkbox" checked={campaign.settings.useLocalAiForMaps} onChange={(event) => updateSettings({ useLocalAiForMaps: event.target.checked })} /></label></>}
+        <button className="connection-test" onClick={testAi} disabled={testingAi || campaign.settings.localAiRuntime === "disabled"}><Link2 size={15} />{testingAi ? "Preparing local model…" : "Prepare and test local model"}</button>
+        <label className="field-label">Local Whisper endpoint<input value={campaign.settings.whisperEndpoint} onChange={(event) => updateSettings({ whisperEndpoint: event.target.value })} placeholder="http://127.0.0.1:8081/inference" /></label>
+        <label className="field-label">Local speech synthesis endpoint<input value={campaign.settings.localTtsEndpoint ?? ""} onChange={(event) => updateSettings({ localTtsEndpoint: event.target.value })} placeholder="http://127.0.0.1:8880/v1" /></label>
+        <label className="field-label">Local voice name<input value={campaign.settings.localTtsVoice ?? "af_heart"} onChange={(event) => updateSettings({ localTtsVoice: event.target.value })} /></label>
+        <label className="toggle-row"><span><strong>Speak DM responses</strong><small>Streams sentence chunks through local TTS or an installed offline voice</small></span><input type="checkbox" checked={campaign.settings.speakDmResponses} onChange={(event) => updateSettings({ speakDmResponses: event.target.checked })} /></label>
       </section>
 
       <section className="settings-section">

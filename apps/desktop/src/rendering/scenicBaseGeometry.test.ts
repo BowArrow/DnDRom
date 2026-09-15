@@ -1,0 +1,12 @@
+import {describe,it,expect} from 'vitest';
+import {fitScenicBase,validateScenicBase,sceneryHeightRatio,isScenicBaseSurface} from './scenicBaseGeometry';
+import {createBasePlateRecipe} from '../domain/baseplates';
+const plate={positions:[-1,.2,-1,1,.2,-1,1,.2,1,-1,.2,1,-1,0,-1,1,0,-1,1,0,1,-1,0,1,.9,3,.9],indices:[0,1,2,0,2,3,4,6,5,4,7,6]};
+describe('scenic base fit',()=>{
+ it('fills the plate width and replaces its vertical origin instead of stacking',()=>{const fit=fitScenicBase([plate],2,.1);expect(fit.scale.x*2).toBeCloseTo(1.96);expect(fit.height).toBeCloseTo(2.94);expect(fit.position.y).toBeCloseTo(0);expect(fit.anchorTop).toBeCloseTo(.2*fit.scale.y+.002);expect(fit.anchorTop).toBeLessThan(fit.height);});
+ it('rejects over-height geometry without squashing or clipping it',()=>{const low=fitScenicBase([plate],2,.04),high=fitScenicBase([plate],2,.3);expect(low.scale.y).toBe(low.scale.x);expect(low.height).toBe(high.height);expect(low.exceedsHeightBudget).toBe(true);expect(()=>validateScenicBase([plate],.1)).toThrow('has not been squashed');});
+ it('moves feet off a tall central flower onto the lower supported plate',()=>{const flower={positions:[-.25,1,-.25,.25,1,-.25,.25,1,.25,-.25,1,.25],indices:[0,1,2,0,2,3]};const fit=fitScenicBase([plate,flower],2,.4);expect(fit.hasStandingSurface).toBe(true);expect(fit.anchorTop).toBeCloseTo(.198);expect(Math.hypot(fit.anchorOffset.x,fit.anchorOffset.z)).toBeGreaterThan(.4);expect(fit.scale.x).toBe(fit.scale.y);});
+ it('rejects a plate with no supported foot area instead of defaulting to its peak',()=>{const fragment={positions:[0,0,0,2,0,0,0,2,.01],indices:[0,1,2]};expect(()=>validateScenicBase([fragment],.4)).toThrow();});
+ it('centres arbitrary exported units and translations',()=>{const shifted={...plate,positions:plate.positions.map((v,i)=>v*100+(i%3===0?200:i%3===1?-50:400))};const f=fitScenicBase([shifted],2,.1);expect(-50*f.scale.y+f.position.y).toBeCloseTo(0);expect(200*f.scale.x+f.position.x).toBeCloseTo(0);expect(400*f.scale.z+f.position.z).toBeCloseTo(0);});
+ it('upgrades old generated mesh roles and supplies a low default',()=>{const recipe=createBasePlateRecipe('grass');expect(sceneryHeightRatio(recipe)).toBe(.1);expect(isScenicBaseSurface({...recipe.layers[0],kind:'prop',name:'AI scenic mesh',propAssetId:'old'})).toBe(true);expect(isScenicBaseSurface({...recipe.layers[0],kind:'prop',name:'Loose rock',propAssetId:'rock'})).toBe(false);});
+});

@@ -13,5 +13,6 @@ coverage/
 playwright-report/
 test-results/
 *.dndrom
+*.dndscene
 .research
-
+artifacts

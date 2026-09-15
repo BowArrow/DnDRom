@@ -1,0 +1,11 @@
+import{readFileSync,writeFileSync,mkdirSync}from'node:fs';import{createRequire}from'node:module';import{serialize,deserialize}from'node:v8';
+const out='artifacts/settlement-034';mkdirSync(out,{recursive:true});const require=createRequire(new URL('../apps/desktop/package.json',import.meta.url));
+await require('esbuild').build({stdin:{contents:'export * from "./apps/desktop/src/domain/worldPipeline";export {planSettlement} from "./apps/desktop/src/domain/settlementPlanner";export {compileSharedScene,sharedWorldEntities} from "./apps/desktop/src/domain/sharedWorldScene";export {configureErosionCache} from "./apps/desktop/src/domain/worldErosion";export {exportUnrealScene} from "./apps/desktop/src/migration/unrealScene";',resolveDir:process.cwd()},outfile:`${out}/pipeline.mjs`,bundle:true,platform:'node',format:'esm'});
+const p=await import(`../${out}/pipeline.mjs`),file=k=>`artifacts/site-failure-032/erosion/${Buffer.from(k).toString('hex')}.bin`;
+p.configureErosionCache({get:k=>{try{return deserialize(readFileSync(file(k)));}catch{}},put:(k,v)=>writeFileSync(file(k),serialize(v))});
+let world=JSON.parse(readFileSync('artifacts/site-failure-032/recovered-world.json'));const before=structuredClone(world),start=performance.now();
+try{
+world=p.reviseSettlement(world,world.manifest.locations[0].id,v=>console.log(v.message));writeFileSync(`${out}/world.json`,JSON.stringify(world));const planMs=performance.now()-start;console.log({planMs,buildings:world.manifest.locations[0].settlement.buildings.length});
+const map=p.compileSharedScene(world,world.manifest.locations[0].id);writeFileSync(`${out}/map.json`,JSON.stringify(map));const sceneMs=performance.now()-start-planMs;
+writeFileSync(`${out}/report.json`,JSON.stringify({planMs,sceneMs,peakRssKiB:process.resourceUsage().maxRSS,buildings:world.manifest.locations[0].settlement.buildings.map(b=>({role:b.role,family:b.program?.family,position:b.position})),validation:p.validatePlan(world.manifest),otherLocationsPreserved:JSON.stringify(before.manifest.locations.slice(1))===JSON.stringify(world.manifest.locations.slice(1)),routesPreserved:JSON.stringify(before.manifest.transport)===JSON.stringify(world.manifest.transport)},null,2));console.log({sceneMs,entities:map.entities.length});
+}catch(e){console.error(e);process.exitCode=1;}

@@ -1,3 +1,11 @@
+import { prepareWorldSiteAsync } from "../domain/worldSiteClient";
+import {generateWorld as generateConnectedWorld,worldFromBlueprint} from '../state/worldGeneration';
+import {SharedWorldPanel} from './SharedWorldPanel';
+import { isUnreal } from "../migration/nativeBridge";
+import { directSceneComposition } from "../ai/sceneDirector";
+import { restyleScene } from "../ai/sceneStyleClient";
+import { SceneArtPanel } from "./SceneArtPanel";
+import { startLocalSpeechStream, type LocalSpeechStream } from "../audio/localSpeechStream";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BookOpen, Check, Cpu, Download, ExternalLink, Globe2, Image, Layers3, Lightbulb, LoaderCircle, Map, Network, Plus, RotateCcw, Search, ShieldCheck, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
 import { downloadPolyHavenPanorama, fetchPolyHavenHdris, type PolyHavenHdri } from "../ai/polyHavenClient";
@@ -114,12 +122,31 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
   const [status, setStatus] = useState("Ready");
   const [running, setRunning] = useState(false);
   const [worldPlanning, setWorldPlanning] = useState(false);
+  const [dictationState, setDictationState] = useState<"starting" | "recording" | "idle">("idle");
+  const [spokenRequest, setSpokenRequest] = useState<string | null>(null);
+  const voiceRef = useRef<LocalSpeechStream | null>(null);
+  const voiceMounted = useRef(true);
+  useEffect(() => { voiceMounted.current = true; return () => { voiceMounted.current = false; voiceRef.current?.abort(); }; }, []);
+  const dictate = async () => {
+    if (dictationState === "starting") return;
+    if (dictationState === "recording") { voiceRef.current?.stop(); setDictationState("idle"); return; }
+    try {
+      setDictationState("starting");
+      const capture = await startLocalSpeechStream(campaign.settings.whisperEndpoint, {
+        onPartial: (text) => { if (voiceMounted.current) setDescription(text); },
+        onFinal: (text) => { if (voiceMounted.current && text.trim()) { setDescription(text); setSpokenRequest(text); } },
+        onSpeechStart: () => { abortRef.current?.abort(); setSpokenRequest(null); },
+        onError: (message) => { if (voiceMounted.current) { setDictationState("idle"); onNotify(message, "warning"); } },
+      });
+      if (!voiceMounted.current) capture.abort(); else { voiceRef.current = capture; setDictationState("recording"); }
+    } catch (error) { setDictationState("idle"); onNotify(error instanceof Error ? error.message : "Local dictation unavailable", "warning"); }
+  };
   const [regionKind, setRegionKind] = useState<WorldRegionKind | "auto">(savedDraft?.regionKind ?? "auto");
   const [worldBiome, setWorldBiome] = useState<WorldBiomeSpec["id"] | "auto">(savedDraft?.biome ?? "auto");
   const [useAdventureContext, setUseAdventureContext] = useState(savedDraft?.useAdventureContext ?? true);
   const [regionSize, setRegionSize] = useState<WorldRegionSize>(savedDraft?.regionSize ?? "medium");
   const [gridShape, setGridShape] = useState<"square" | "hex">(savedDraft?.gridShape ?? "square");
-  const [worldQuality, setWorldQuality] = useState<WorldForgeQuality>(savedDraft?.worldQuality ?? "complete");
+  const [worldQuality, setWorldQuality] = useState<WorldForgeQuality>(savedDraft?.worldQuality ?? (isUnreal() ? "quick" : "complete"));
   const [worldSeed, setWorldSeed] = useState(savedDraft?.seed ?? Math.floor(Math.random() * 2_147_483_647));
   const [concepts, setConcepts] = useState<WorldBlueprintV1[]>(savedDraft?.concepts ?? []);
   const [selectedConceptId, setSelectedConceptId] = useState(savedDraft?.selectedConceptId ?? savedDraft?.concepts?.[0]?.id ?? "");
@@ -177,7 +204,36 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
       if (cancelled) return;
       if (savedPanorama) setPanorama(savedPanorama);
       if (savedWorld) {
-        try { setDraftMap(JSON.parse(await savedWorld.text()) as GameMap); }
+        try {
+          const restored = JSON.parse(await savedWorld.text()) as GameMap;
+          if (restored.generation?.blueprint && (restored.world?.generatorRevision ?? 0) < WORLD_GENERATOR_REVISION) {
+            try {
+              setStatus(`Upgrading saved world geometry to renderer v${WORLD_GENERATOR_REVISION}...`);
+              const rebuilt = await compileWorldBlueprintAsync(restored.generation.blueprint);
+              if (cancelled) return;
+              const upgraded: GameMap = {
+                ...rebuilt.map,
+                id: restored.id,
+                name: restored.name,
+                lighting: restored.lighting ?? rebuilt.map.lighting,
+                generation: {
+                  ...rebuilt.map.generation!,
+                  quality: restored.generation.quality,
+                  revision: restored.generation.revision,
+                },
+              };
+              setDraftMap(upgraded);
+              await writeCreatorDraftFile(campaign.id, "scene-world-draft", new File([JSON.stringify(upgraded)], "scene-world-draft.json", { type: "application/json" }));
+              setStatus(`Saved world rebuilt with terrain and water pipeline v${WORLD_GENERATOR_REVISION}`);
+            } catch {
+              // Keep the recoverable draft visible if a worker/browser upgrade
+              // fails. The player can still explicitly rebuild it instead of
+              // seeing an empty Forge with no explanation.
+              setDraftMap(restored);
+              setStatus("Saved world opened in compatibility mode; rebuild it to apply the latest terrain pipeline.");
+            }
+          } else setDraftMap(restored);
+        }
         catch { /* An invalid interrupted draft is ignored; its blueprint remains recoverable. */ }
       }
       reconstructionMetricsRef.current = savedCheckpoint?.reconstructionMetrics ?? null;
@@ -734,7 +790,7 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
     }
   };
 
-  const createWorldPlans = async () => {
+  const createWorldPlans = async (autoBuild = false) => {
     if (!description.trim() || running || worldPlanning) return;
     dismissFailedGenerationJobs("scene");
     const controller = new AbortController();
@@ -756,9 +812,13 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
       } : {}, controller.signal);
       setConcepts(result.blueprints);
       setSelectedConceptId(result.blueprints[0].id);
-      setDraftMap(null);
       await storeWorldBlueprint(result.blueprints[0]);
       await writeWorldGenerationCheckpoint({ id: crypto.randomUUID(), campaignId: campaign.id, blueprintId: result.blueprints[0].id, stage: "concept", completedChunkIds: [], completedAssetRequestIds: [], retryable: true, updatedAt: new Date().toISOString() });
+      if (autoBuild) {
+        if (result.warning) onNotify(result.warning, "warning");
+        await buildPlayableWorld(result.blueprints[0], { controller, jobId });
+        return;
+      }
       updateGenerationJob(jobId, { status: "complete", message: "Two playable world concepts are ready", stageLabel: "Concept review", percent: 100, detail: result.warning ?? `${result.provider === "local-ai" ? "Local AI" : "Deterministic"} blueprints validated` });
       setStatus(result.warning ?? "Choose a world concept, then build its playable region");
       if (result.warning) onNotify(result.warning, "warning");
@@ -772,19 +832,51 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
     }
   };
 
-  const buildPlayableWorld = async () => {
-    const blueprint = concepts.find((entry) => entry.id === selectedConceptId);
-    if (!blueprint || running || worldPlanning) return;
-    const controller = new AbortController();
+  useEffect(() => {
+    if (!spokenRequest || running || worldPlanning) return;
+    setSpokenRequest(null);
+    void createWorldPlans(true);
+  }, [spokenRequest, running, worldPlanning]);
+
+  const buildPlayableWorld = async (override?: WorldBlueprintV1, inherited?: { controller: AbortController; jobId: string }) => {
+    let blueprint = override ?? concepts.find((entry) => entry.id === selectedConceptId);
+    if (!blueprint || (!inherited && (running || worldPlanning))) return;
+    const controller = inherited?.controller ?? new AbortController();
     abortRef.current = controller;
     setWorldPlanning(true);
-    const jobId = beginGenerationJob({ kind: "scene", label: "Playable world", message: "Generating structural chunks…", stageLabel: "Structural chunks", percent: 15, onCancel: () => controller.abort() });
+    const jobId = inherited?.jobId ?? beginGenerationJob({ kind: "scene", label: "Playable world", message: "Generating structural chunks…", stageLabel: "Structural chunks", percent: 15, onCancel: () => controller.abort() });
     const checkpointId = crypto.randomUUID();
     activeJobIdRef.current = jobId;
     try {
       if (!await waitForGenerationJobTurn(jobId)) return;
+      if(blueprint.kind!=='interior'&&blueprint.kind!=='dungeon'){
+        updateGenerationJob(jobId,{status:'complete',percent:100,message:'Scene requirements ready'});
+        await generateConnectedWorld(worldFromBlueprint(blueprint),undefined,undefined,controller.signal); controller.signal.throwIfAborted();
+        setStatus('Connected world generated. Open the table to explore.');
+        return;
+      }
       await writeWorldGenerationCheckpoint({ id: checkpointId, campaignId: campaign.id, blueprintId: blueprint.id, stage: "structure", completedChunkIds: [], completedAssetRequestIds: [], retryable: true, updatedAt: new Date().toISOString() });
+      setStatus("Finding a suitable site in the eroded landscape...");
+      updateGenerationJob(jobId, { message: "Simulating terrain and selecting a supported geographic site", percent: 5 });
+      blueprint = await prepareWorldSiteAsync(blueprint, controller.signal);
+      let compositionWarning: string | undefined;
+      let provider: "local-ai" | "procedural" = blueprint.composition ? "local-ai" : "procedural";
+      if (!blueprint.composition) {
+        setStatus("Designing architecture and scene composition…");
+        updateGenerationJob(jobId, { message: "Designing construction recipes and scene layout", percent: 10 });
+        const directed = await directSceneComposition(blueprint, campaign.settings, controller.signal);
+        blueprint = directed.blueprint; compositionWarning = directed.warning; provider = directed.provider;
+        setConcepts((current) => current.map((entry) => entry.id === blueprint!.id ? blueprint! : entry));
+      }
+      controller.signal.throwIfAborted();
+      setStatus("Sculpting terrain and building the scene…");
       const compiled = await compileWorldBlueprintAsync(blueprint, controller.signal);
+      compiled.map.generation = { ...compiled.map.generation!, provider };
+      setDraftMap(compiled.map);
+      // Persist independently of this workspace's React lifetime. A generation
+      // can finish while the user is playing or editing another forge.
+      await writeCreatorDraftFile(campaign.id, "scene-world-draft", new File([JSON.stringify(compiled.map)], "scene-world-draft.json", { type: "application/json" }));
+      if (compositionWarning) onNotify(compositionWarning, "warning");
       compiled.map.generation = { ...compiled.map.generation!, quality: worldQuality };
       compiled.map.pendingRefinements = planWorldRefinements({ map: compiled.map, campaignProps: campaign.propAssets ?? [], campaignMaterials: campaign.materialAssets ?? [], deviceProps: propLibrary, deviceMaterials: materialLibrary });
       const completedChunkIds: string[] = [];
@@ -805,6 +897,21 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
       }
       setDraftMap(compiled.map);
       await storeWorldBlueprint(blueprint);
+      if (worldQuality !== "quick" && provider === "local-ai") {
+        try {
+          const styled = await restyleScene({ map: compiled.map, instruction: blueprint.description, references: [], settings: campaign.settings, signal: controller.signal,
+            saveMaterial: (asset) => useCampaignStore.getState().saveMaterialAsset(asset), saveProp: (asset) => useCampaignStore.getState().savePropAsset(asset),
+            onPreview: setDraftMap,
+            onProgress: (message, percent) => { setStatus(message); updateGenerationJob(jobId, { message, stageLabel: "Local surfaces and props", percent: 46 + percent * .53 }); },
+          });
+          setDraftMap(styled.map);
+          await writeCreatorDraftFile(campaign.id, "scene-world-draft", new File([JSON.stringify(styled.map)], "scene-world-draft.json", { type: "application/json" }));
+          if (styled.warnings.length) onNotify(styled.warnings.join(" "), "warning");
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          onNotify(`The scene is built. Local art finishing needs another try: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        }
+      }
       await writeWorldGenerationCheckpoint({ id: checkpointId, campaignId: campaign.id, blueprintId: blueprint.id, stage: "validation", completedChunkIds: compiled.map.world?.chunks.map((entry) => entry.id) ?? [], completedAssetRequestIds: blueprint.assetRequests.filter((entry) => entry.status === "resolved").map((entry) => entry.id), retryable: true, updatedAt: new Date().toISOString() });
       updateGenerationJob(jobId, { status: "complete", message: "Playable procedural world ready for review", stageLabel: "Gameplay validation", percent: 100, detail: `${compiled.map.world?.chunks.length ?? 1} chunks · ${compiled.map.entities.length} editable objects · ${compiled.validation.warnings.length} warnings` });
       setStatus("Playable world ready · publish now or continue with optional visual finishing");
@@ -875,7 +982,7 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
   };
 
   const startNewScene = () => {
-    if (running) return;
+    if (running || worldPlanning) return;
     setPanorama(null);
     setDescription("");
     setReusePanoramaOnRetry(false);
@@ -897,38 +1004,46 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
             <div className="creator-page-actions"><button onClick={onBack} disabled={running || worldPlanning}><ArrowLeft size={15} /> Tabletop</button><small>Draft autosaved locally</small><button onClick={() => setSceneCatalogueOpen(true)}><BookOpen size={15} /> Scene catalogue</button><button onClick={startNewScene} disabled={running || worldPlanning}><Plus size={15} /> New scene</button></div>
             <span className="eyebrow arcane-eyebrow"><WandSparkles size={13} /> Local world forge</span>
             <h2>Conjure a world from an idea</h2>
-            <p>Generate a panorama from a prompt, begin with a free real-world HDRI, or bring your own image. SplatKit builds presentation scenery while the editable mesh map remains authoritative.</p>
+            <p>Describe your world. Local AI designs its architecture and composition, and procedural geometry builds an editable scene. Restyle its surfaces from text or images, or add a panoramic background.</p>
 
             <div className="creator-editor-shell scene-editor-shell">
             <aside className="creator-sidebar creator-sidebar-left" aria-label="Scene source settings">
+            <details className="workspace-disclosure"><summary>Connected world & scenes</summary><SharedWorldPanel /></details>
             <div className="sidebar-section-heading"><WandSparkles size={14} /><span><strong>Scene source</strong><small>Prompt, library, or panorama</small></span></div>
             <div className="runtime-strip"><span><Cpu size={14} /> Local forge</span><small>Automatic</small></div>
             <section className="world-blueprint-controls" aria-label="Procedural world settings">
+              <label className="field-label vellum-field">Describe the world<textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="A ruined village deep in the forest, or timber courtyards under curved jade roofs…" /></label>
+              <button disabled={dictationState === "starting" || (dictationState === "idle" && (running || worldPlanning))} onClick={() => void dictate()}>{dictationState === "recording" ? "Stop speak mode" : dictationState === "starting" ? "Opening microphone…" : "Speak mode"}</button>
+              <small>Speak naturally; local audio chunks update the description, and a pause starts generation. Speak again to interrupt and describe a replacement scene.</small>
+              <details className="workspace-disclosure"><summary>Region, biome & generation settings</summary>
               <div className="sidebar-section-heading"><Map size={14} /><span><strong>Playable region</strong><small>AI-directed procedural geometry</small></span></div>
               <label className="field-label">Region type<select value={regionKind} onChange={(event) => setRegionKind(event.target.value as WorldRegionKind | "auto")}><option value="auto">Auto-detect</option><option value="exterior">Exterior</option><option value="settlement">Settlement</option><option value="interior">Interior</option><option value="dungeon">Dungeon</option></select></label>
               <label className="field-label">Biome<select value={worldBiome} onChange={(event) => setWorldBiome(event.target.value as WorldBiomeSpec["id"] | "auto")}><option value="auto">Infer from description</option><option value="forest">Forest</option><option value="plains">Plains</option><option value="mountains">Mountains</option><option value="coast">Coast</option><option value="swamp">Swamp</option><option value="desert">Desert</option><option value="snow">Snow</option><option value="urban">Urban</option><option value="dungeon">Dungeon</option><option value="cavern">Cavern</option></select></label>
-              <div className="world-control-row"><label className="field-label">Size<select value={regionSize} onChange={(event) => setRegionSize(event.target.value as WorldRegionSize)}><option value="small">Small · 64m</option><option value="medium">Medium · 128m</option><option value="large">Large · 256m</option></select></label><label className="field-label">Grid<select value={gridShape} onChange={(event) => setGridShape(event.target.value as "square" | "hex")}><option value="square">Square</option><option value="hex">Hex</option></select></label></div>
-              <label className="field-label">Forge profile<select value={worldQuality} onChange={(event) => setWorldQuality(event.target.value as WorldForgeQuality)}><option value="quick">Quick · catalogue only</option><option value="complete">Complete · AI assets</option><option value="showpiece">Showpiece · background splat</option></select></label>
+              <div className="world-control-row"><label className="field-label">{isUnreal() ? "Initial detail area" : "Size"}<select value={regionSize} onChange={(event) => setRegionSize(event.target.value as WorldRegionSize)}><option value="small">Small · 64m</option><option value="medium">Medium · 128m</option><option value="large">Large · 256m</option></select></label><label className="field-label">Grid<select value={gridShape} onChange={(event) => setGridShape(event.target.value as "square" | "hex")}><option value="square">Square</option><option value="hex">Hex</option></select></label></div>
+              <label className="field-label">Forge profile<select value={worldQuality} onChange={(event) => setWorldQuality(event.target.value as WorldForgeQuality)}><option value="quick">Quick · procedural surfaces</option><option value="complete">Complete · local AI surfaces & props</option><option value="showpiece">Complete + background plan</option></select></label>
               <label className="field-label">World seed<input type="number" min="0" max="2147483647" value={worldSeed} onChange={(event) => setWorldSeed(Math.max(0, Math.min(2_147_483_647, Number(event.target.value) || 0)))} /></label>
               <label className="world-context-toggle"><input type="checkbox" checked={useAdventureContext} onChange={(event) => setUseAdventureContext(event.target.checked)} /><span>Use current-adventure context<small>Only bounded location, biome, scene tags, party footprint, and resolved events.</small></span></label>
-              <button className="primary-button" disabled={!description.trim() || running || worldPlanning} onClick={() => void createWorldPlans()}>{worldPlanning ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} Create two world plans</button>
+              </details>
+              <button className="primary-button" disabled={!description.trim() || running || worldPlanning} onClick={() => void createWorldPlans(true)}>Generate scene</button>
+              {worldPlanning && <button onClick={() => abortRef.current?.abort()}>Stop generation</button>}
+              <button disabled={!description.trim() || running || worldPlanning} onClick={() => void createWorldPlans()}>{worldPlanning ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} Create two world plans</button>
             </section>
-            <div className="panorama-source-tabs" role="tablist" aria-label="Panorama source">
+            {!isUnreal() && <div className="panorama-source-tabs" role="tablist" aria-label="Panorama source">
               <button className={sourceMode === "prompt" ? "active" : ""} onClick={() => chooseSourceMode("prompt")}><Sparkles size={14} /> Prompt</button>
               <button className={sourceMode === "library" ? "active" : ""} onClick={() => chooseSourceMode("library")}><Globe2 size={14} /> Online library</button>
               <button className={sourceMode === "upload" ? "active" : ""} onClick={() => chooseSourceMode("upload")}><Upload size={14} /> Upload</button>
-            </div>
+            </div>}
 
-            {sourceMode === "prompt" && <div className="source-workspace prompt-workspace">
-              <label className="field-label vellum-field">Describe the world<textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="A moonlit harbor where black water reflects lanterns…" /></label>
+            {(isUnreal() || sourceMode === "prompt") && <div className="source-workspace prompt-workspace">
+              {!isUnreal() && <label className="field-label">Local Whisper endpoint<input type="url" value={campaign.settings.whisperEndpoint} onChange={(event) => updateSettings({ whisperEndpoint: event.target.value })} placeholder="http://127.0.0.1:8081/inference" /></label>}
               <section className="offline-idea-library">
                 <div className="idea-library-heading"><div><strong>Story seeds</strong><small>Choose one, then make it yours</small></div><label><Search size={13} /><input value={ideaSearch} onChange={(event) => setIdeaSearch(event.target.value)} placeholder="Coast, town, forest…" /></label></div>
-                <div className="idea-card-grid">{visibleIdeas.map((idea) => <button key={idea.name} onClick={() => setDescription(`${idea.prompt}, seamless 360 panorama`)} style={{ background: `linear-gradient(145deg, ${idea.palette.split(",")[0]}, ${idea.palette.split(",")[1]})` }}><Sparkles size={13} /><strong>{idea.name}</strong><small>{idea.tags}</small></button>)}</div>
+                <div className="idea-card-grid">{visibleIdeas.map((idea) => <button key={idea.name} onClick={() => setDescription(isUnreal() ? idea.prompt : `${idea.prompt}, seamless 360 panorama`)} style={{ background: `linear-gradient(145deg, ${idea.palette.split(",")[0]}, ${idea.palette.split(",")[1]})` }}><Sparkles size={13} /><strong>{idea.name}</strong><small>{idea.tags}</small></button>)}</div>
               </section>
               {!panoramaWorkflow && checkpoints.length > 0 && <label className="field-label checkpoint-choice">Local image model<select value={checkpoint} onChange={(event) => setCheckpoint(event.target.value)}>{checkpoints.map((name) => <option key={name} value={name}>{name}</option>)}</select><small>Quick draft mode uses only built-in ComfyUI nodes.</small></label>}
             </div>}
 
-            {sourceMode === "library" && <div className="source-workspace library-workspace">
+            {!isUnreal() && sourceMode === "library" && <div className="source-workspace library-workspace">
               <div className="library-heading"><div><strong>Poly Haven panoramas</strong><small>Free CC0 HDRIs · live online catalog</small></div><label><Search size={14} /><input value={librarySearch} onChange={(event) => { setLibrarySearch(event.target.value); setCatalogLimit(24); }} placeholder="Forest, castle, night…" /></label></div>
               {catalogLoading && <div className="library-state"><LoaderCircle className="spin" size={18} /> Opening the public library…</div>}
               {catalogError && <div className="library-state error">{catalogError}<button onClick={() => void loadCatalog()}>Try again</button></div>}
@@ -937,7 +1052,7 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
               {selectedHdri && <div className="selected-hdri"><span><strong>{selectedHdri.name}</strong><small>{selectedHdri.authors.length ? `By ${selectedHdri.authors.join(", ")} · ` : ""}CC0 via Poly Haven</small></span><button onClick={() => void useSelectedHdri()} disabled={running}><Globe2 size={14} /> Use this HDRI</button></div>}
             </div>}
 
-            {sourceMode === "upload" && <div className="source-workspace upload-workspace">
+            {!isUnreal() && sourceMode === "upload" && <div className="source-workspace upload-workspace">
               <label className={`panorama-dropzone ${panorama ? "has-file" : ""}`}>
                 {panoramaPreview ? <img src={panoramaPreview} alt="Selected panorama preview" /> : <Image size={30} />}
                 <span><strong>{panorama?.name ?? "Choose a 2:1 panorama"}</strong><small>PNG, JPEG, or WebP · equirectangular works best</small></span>
@@ -947,7 +1062,7 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
             </div>}
 
             {sourceMode === "library" && panoramaPreview && <div className="panorama-ready"><img src={panoramaPreview} alt="Selected Poly Haven panorama" /><span><Check size={14} /> Panorama ready</span></div>}
-            <section className="forge-setup compact-forge-setup">
+            {!isUnreal() && <section className="forge-setup compact-forge-setup">
               <div><strong>Local workflows</strong><small>Included and ready to run.</small></div>
               <div className="splat-input-grid">
                 <div className="included-workflow"><Check size={16} /><strong>360° panorama</strong><small>{panoramaWorkflowName}</small><label>Override<input type="file" accept="application/json,.json" onChange={(event) => void loadWorkflow(event.target.files?.[0], "panorama")} /></label></div>
@@ -955,21 +1070,22 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
                 <label><Upload size={16} /><strong>Import splat</strong><small>PLY or SOG</small><input type="file" accept=".ply,.sog" onChange={(event) => void importSplat(event.target.files?.[0])} /></label>
               </div>
               <div className="automatic-setup-note"><Download size={14} /><span><strong>No manual setup</strong><small>DnDRom installs and starts every local tool.</small></span></div>
-            </section>
+            </section>}
             </aside>
 
             <main className="creator-stage scene-creator-stage" aria-label="Scene 3D preview">
               <div className="scene-forge-stage"><SceneViewport map={forgePreviewMap} tokenAssets={tokenAssets.length ? tokenAssets : EMPTY_TOKEN_ASSETS} propAssets={campaign.propAssets ?? []} materialAssets={campaign.materialAssets ?? []} selectedEntityId={null} activeAssetId={null} showGrid={false} environmentPanorama={panorama} worldOverview onPlace={() => undefined} onSelect={() => undefined} onPipette={() => undefined} />{panoramaPreview && <div className="scene-source-preview"><img src={panoramaPreview} alt="Current scene panorama" /><span>IBL source</span></div>}</div>
               {concepts.length > 0 && <section className="world-concept-review" aria-label="World concept review">{concepts.map((concept, index) => <button key={concept.id} className={selectedConceptId === concept.id ? "selected" : ""} onClick={() => { setSelectedConceptId(concept.id); setDraftMap(null); }}><span className="concept-map-icon"><Map size={20} /></span><span><strong>Concept {index + 1}: {concept.name}</strong><small>{concept.kind} · {concept.width}m · {concept.biome.id} · {concept.zones.length} connected zones</small></span>{selectedConceptId === concept.id && <Check size={15} />}</button>)}</section>}
-              <div className="stage-status-bar"><div className="splat-status" aria-live="polite"><span className={running ? "pulse" : ""} />{status}</div>{retryAvailable && !running && <><button className="world-retry-button" onClick={() => void runGeneration(true)}><RotateCcw size={15} /> Retry failed stage</button><button className="world-retry-button" onClick={retryWithReferenceQuality}><Sparkles size={15} /> Retry with reference quality</button><button className="world-retry-button" disabled={!draftMap?.validation?.valid} onClick={publishBaseWorld}><ShieldCheck size={15} /> Continue without background</button></>}<button className="primary-button magical-button" disabled={running || (sourceMode === "prompt" ? !description.trim() : !panorama)} onClick={() => void runGeneration()}>{running ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}{running ? "Forging your world…" : sourceMode === "prompt" ? "Generate panorama + 3D world" : "Build 3D world locally"}</button>{running && <button className="danger-button" onClick={() => abortRef.current?.abort()}>Cancel</button>}</div>
+              {isUnreal() ? <div className="stage-status-bar"><span>{worldPlanning ? "Creating your scene locally?" : draftMap ? "Native world ready for review and publishing" : "Describe a scene and select Generate scene"}</span></div> : <div className="stage-status-bar"><div className="splat-status" aria-live="polite"><span className={running ? "pulse" : ""} />{status}</div>{retryAvailable && !running && <><button className="world-retry-button" onClick={() => void runGeneration(true)}><RotateCcw size={15} /> Retry failed stage</button><button className="world-retry-button" onClick={retryWithReferenceQuality}><Sparkles size={15} /> Retry with reference quality</button><button className="world-retry-button" disabled={!draftMap?.validation?.valid} onClick={publishBaseWorld}><ShieldCheck size={15} /> Continue without background</button></>}<button className="primary-button magical-button" disabled={worldPlanning || running || (sourceMode === "prompt" ? !description.trim() : !panorama)} onClick={() => void runGeneration()}>{running ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}{running ? "Forging your world…" : sourceMode === "prompt" ? "Generate panorama + 3D world" : "Build 3D world locally"}</button>{running && <button className="danger-button" onClick={() => abortRef.current?.abort()}>Cancel</button>}</div>}
               {legacyGeneratedWorld && <div className="world-pipeline-upgrade" role="status"><span><strong>Legacy flat-tile world</strong><small>This saved scene predates elevation fields, ribbon roads and rivers, ecological foliage, and terrain streaming fixes.</small></span><button className="primary-button" disabled={running || worldPlanning} onClick={prepareLegacyWorldRebuild}><RotateCcw size={14} /> Prepare visual rebuild</button></div>}
               <div className="stage-caption"><strong>{previewMap.name}</strong><span>{draftMap ? `${draftMap.world?.chunks.length ?? 1} streaming chunks · procedural gameplay authority` : "Drag to orbit · wheel to zoom · current published scene remains unchanged"}</span></div>
             </main>
 
             <aside className="creator-sidebar creator-sidebar-right" aria-label="Scene lighting settings">
+              <SceneArtPanel map={previewMap} disabled={running || worldPlanning} onChange={setDraftMap} onBusy={setWorldPlanning} onNotify={onNotify} />
               <section className="world-draft-inspector" aria-label="World draft actions">
                 <div className="sidebar-section-heading"><Network size={14} /><span><strong>World blueprint</strong><small>Review, validate, and publish</small></span></div>
-                {selectedConceptId ? <><dl><div><dt>Concept</dt><dd>{concepts.find((entry) => entry.id === selectedConceptId)?.name}</dd></div><div><dt>Chunks</dt><dd>{draftMap?.world?.chunks.length ?? "Not built"}</dd></div><div><dt>Objects</dt><dd>{draftMap?.entities.length ?? "—"}</dd></div><div><dt>Validation</dt><dd className={draftMap?.validation?.valid ? "valid" : "pending"}>{draftMap?.validation?.valid ? "Passed" : "Pending"}</dd></div></dl><button className="primary-button" disabled={worldPlanning || running} onClick={() => void buildPlayableWorld()}>{worldPlanning ? <LoaderCircle className="spin" size={15} /> : <Layers3 size={15} />} Build playable world</button><button className="world-publish-button" disabled={!draftMap?.validation?.valid || worldPlanning || running} onClick={publishBaseWorld}><ShieldCheck size={15} /> Publish base world</button><small>Publishing always creates a new scene. Optional AI refinements remain reviewable.</small></> : <p>Create two plans to begin. Nothing changes the live campaign until Publish.</p>}
+                {selectedConceptId ? <><dl><div><dt>Concept</dt><dd>{concepts.find((entry) => entry.id === selectedConceptId)?.name}</dd></div><div><dt>Chunks</dt><dd>{draftMap?.world?.chunks.length ?? "Not built"}</dd></div><div><dt>Objects</dt><dd>{draftMap?.entities.length ?? "—"}</dd></div><div><dt>Validation</dt><dd className={draftMap?.validation?.valid ? "valid" : "pending"}>{draftMap?.validation?.valid ? "Passed" : "Pending"}</dd></div></dl><button className="primary-button" disabled={worldPlanning || running} onClick={() => void buildPlayableWorld()}>{worldPlanning ? <LoaderCircle className="spin" size={15} /> : <Layers3 size={15} />} Build playable world</button><button className="world-publish-button" disabled={!draftMap?.validation?.valid || worldPlanning || running} onClick={publishBaseWorld}><ShieldCheck size={15} /> Publish base world</button><small>Publishing always creates a new scene. Optional AI refinements remain reviewable.</small></> : <p>Describe a scene and select Generate scene to begin. Publish adds the finished draft to your campaign.</p>}
               </section>
               {selectedBlueprint && <section className="world-blueprint-details" aria-label="World blueprint details">
                 <div><strong>Zones & connectivity</strong><small>{selectedBlueprint.zones.length} validated regions</small></div>
@@ -985,26 +1101,27 @@ export function WorldSplatPanel({ onNotify, onBack, onOpenPropForge }: WorldSpla
               <label className="field-label">Scene quality<select value={lighting.quality} onChange={(event) => updateMapLighting({ quality: event.target.value as LightingQuality })}><option value="performance">Performance</option><option value="balanced">Balanced</option><option value="cinematic">Cinematic</option><option value="diorama">Diorama</option></select><small>The top-bar Display setting can override this scene.</small></label>
               <label className="field-label">HDRI / IBL <span>{lighting.iblIntensity.toFixed(2)}×</span><input type="range" min="0" max="1.5" step="0.05" value={lighting.iblIntensity} onChange={(event) => updateMapLighting({ iblIntensity: Number(event.target.value) })} /></label>
               <label className="field-label">Sun / moon key <span>{lighting.keyIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={lighting.keyIntensity} onChange={(event) => updateMapLighting({ keyIntensity: Number(event.target.value) })} /><small>Directional world light. Generated regions retain a safe visibility floor.</small></label>
-              <label className="field-label">Cool fill <span>{lighting.fillIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={lighting.fillIntensity} onChange={(event) => updateMapLighting({ fillIntensity: Number(event.target.value) })} /></label>
-              <label className="field-label">Camera rim <span>{lighting.rimIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={lighting.rimIntensity} onChange={(event) => updateMapLighting({ rimIntensity: Number(event.target.value) })} /></label>
+              {!isUnreal() && <label className="field-label">Cool fill <span>{lighting.fillIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={lighting.fillIntensity} onChange={(event) => updateMapLighting({ fillIntensity: Number(event.target.value) })} /></label>}
+              {!isUnreal() && <label className="field-label">Camera rim <span>{lighting.rimIntensity.toFixed(2)}×</span><input type="range" min="0" max="2" step="0.05" value={lighting.rimIntensity} onChange={(event) => updateMapLighting({ rimIntensity: Number(event.target.value) })} /></label>}
               <label className="field-label">Exposure <span>{lighting.exposure.toFixed(2)}×</span><input type="range" min="0.55" max="1.6" step="0.05" value={lighting.exposure} onChange={(event) => updateMapLighting({ exposure: Number(event.target.value) })} /></label>
               <div className="lighting-toggle-grid">
                 <label><input type="checkbox" checked={lighting.dynamicLights} onChange={(event) => updateMapLighting({ dynamicLights: event.target.checked })} /><span>Practical lights<small>Torches and magic</small></span></label>
                 <label><input type="checkbox" checked={lighting.ssao} onChange={(event) => updateMapLighting({ ssao: event.target.checked })} /><span>SSAO<small>Contact grounding</small></span></label>
                 <label><input type="checkbox" checked={lighting.bloom} onChange={(event) => updateMapLighting({ bloom: event.target.checked })} /><span>Bloom<small>Emissive glow</small></span></label>
-                <label><input type="checkbox" checked={lighting.depthOfField} onChange={(event) => updateMapLighting({ depthOfField: event.target.checked })} /><span>Tilt-shift DoF<small>Miniature focus</small></span></label>
-                <label><input type="checkbox" checked={lighting.fogOfWar} onChange={(event) => updateMapLighting({ fogOfWar: event.target.checked })} /><span>Fog of war<small>Published Play view; Forge stays fully visible</small></span></label>
+                {!isUnreal() && <label><input type="checkbox" checked={lighting.depthOfField} onChange={(event) => updateMapLighting({ depthOfField: event.target.checked })} /><span>Tilt-shift DoF<small>Miniature focus</small></span></label>}
+                {!isUnreal() && <label><input type="checkbox" checked={lighting.fogOfWar} onChange={(event) => updateMapLighting({ fogOfWar: event.target.checked })} /><span>Fog of war<small>Published Play view; Forge stays fully visible</small></span></label>}
                 <label><input type="checkbox" checked={lighting.fogMist} onChange={(event) => updateMapLighting({ fogMist: event.target.checked })} /><span>Volumetric mist<small>Cinematic quality</small></span></label>
               </div>
-              <p className="lighting-budget-note">{lighting.quality === "performance" ? "2 smooth practical lights · one 1024px directional shadow · post effects reduced" : lighting.quality === "balanced" ? "4 smooth practical lights · one 2048px directional shadow · balanced SSAO" : lighting.quality === "cinematic" ? "6 smooth practical lights · one 2048px directional shadow · cinematic SSAO and DoF" : "8 smooth practical lights · one 4096px directional shadow · supersampled diorama detail"}</p>
+              {!isUnreal() && <p className="lighting-budget-note">{lighting.quality === "performance" ? "2 smooth practical lights · one 1024px directional shadow · post effects reduced" : lighting.quality === "balanced" ? "4 smooth practical lights · one 2048px directional shadow · balanced SSAO" : lighting.quality === "cinematic" ? "6 smooth practical lights · one 2048px directional shadow · cinematic SSAO and DoF" : "8 smooth practical lights · one 4096px directional shadow · supersampled diorama detail"}</p>}
             <section className="forge-setup">
               {scenery.length > 0 && <section className="splat-list"><strong>Scenery on {campaign.map.name}</strong>{scenery.map((entry) => <div key={entry.id}><span>{entry.name}<small>{entry.format.toUpperCase()} · {formatBytes(entry.byteLength)}</small></span><button title="Remove from map" onClick={() => removeScenery(entry.id)}><Trash2 size={14} /></button></div>)}</section>}
             </section>
-            <p className="splat-links"><a href="https://github.com/mickmumpitz/ComfyUI-SplatKit" target="_blank" rel="noreferrer"><ExternalLink size={12} /> SplatKit</a><a href="https://github.com/ArthurBrussee/brush" target="_blank" rel="noreferrer"><ExternalLink size={12} /> Brush</a><a href="https://polyhaven.com/hdris" target="_blank" rel="noreferrer"><ExternalLink size={12} /> Poly Haven</a></p>
+            {!isUnreal() && <p className="splat-links"><a href="https://github.com/mickmumpitz/ComfyUI-SplatKit" target="_blank" rel="noreferrer"><ExternalLink size={12} /> SplatKit</a><a href="https://github.com/ArthurBrussee/brush" target="_blank" rel="noreferrer"><ExternalLink size={12} /> Brush</a><a href="https://polyhaven.com/hdris" target="_blank" rel="noreferrer"><ExternalLink size={12} /> Poly Haven</a></p>}
             </aside>
             </div>
-            <p className="local-only-note">Generation stays local. The online library only requests public thumbnails and your chosen CC0 panorama from Poly Haven.</p>
+            <p className="local-only-note">{isUnreal() ? "AI generation runs on this PC. Models are downloaded when first used. Campaigns and generated assets stay local." : "Generation stays local. The online library only requests public thumbnails and your chosen CC0 panorama from Poly Haven."}</p>
             {sceneCatalogueOpen && <AssetCatalogueDialog ariaLabel="Scene catalogue" eyebrow={<><BookOpen size={13} /> Local scene catalogue</>} title="Reusable playable worlds" description="Search generated regions, inspect their dependencies, and load a copy into Scene Forge without replacing the current scene." searchPlaceholder="Search scenes, biomes, or descriptions" onClose={() => setSceneCatalogueOpen(false)} empty={<div className="miniature-library-empty"><Map size={28} /><strong>No saved scenes yet</strong><small>Publish a playable world and it will be saved here.</small></div>} items={sceneLibrary.map((template) => { const inCampaign = campaign.sceneTemplates?.some((entry) => entry.id === template.id) ?? false; return { id: template.id, name: template.name, searchText: `${template.description} ${template.map.theme} ${template.map.generation?.blueprint.biome.id ?? ""}`, preview: <div className="scene-template-preview" style={{ background: `linear-gradient(145deg, ${template.map.ambientColor}, #10130f)` }}><Map size={32} /><span>{template.map.width}×{template.map.depth}m</span></div>, details: <>{template.map.theme} · {template.map.world?.chunks.length ?? 1} chunks · {template.revisions.length} revisions · {template.propAssetIds.length + template.materialAssetIds.length} dependencies</>, inCampaign, actions: <><button onClick={() => openSceneTemplate(template.map, template.description)}>Open in Forge</button><button onClick={() => duplicateSceneTemplate(template.map, template.description)}>Duplicate</button>{template.revisions.length > 1 && <button onClick={() => openSceneTemplate(template.revisions[1].map, template.description)}>Restore prior revision</button>}{inCampaign ? <button onClick={() => removeSceneTemplateFromCampaign(template.id)}>Remove from campaign</button> : <button className="primary-button" onClick={() => addSceneTemplateToCampaign(template.id)}>Add to campaign</button>}<button className="danger-button" onClick={() => removeSceneTemplate(template.id)}><Trash2 size={13} /> Delete</button></>, status: inCampaign ? <span className="campaign-token-status"><Check size={12} /> In campaign</span> : undefined }; })} />}
           </section>
   );
 }
+

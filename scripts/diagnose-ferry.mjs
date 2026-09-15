@@ -1,0 +1,4 @@
+import {readFileSync}from'node:fs';import{deserialize}from'node:v8';import * as p from '../artifacts/site-failure-032/pipeline.mjs';
+p.configureErosionCache({get:k=>{try{return deserialize(readFileSync(`artifacts/site-failure-032/erosion/${Buffer.from(k).toString('hex')}.bin`));}catch{}},put:()=>{}});
+const m=JSON.parse(readFileSync('artifacts/site-failure-032/checkpoint.json')).world.manifest,t=p.worldTerrain(m);
+for(const l of [...m.locations,...[0,1,2,3].map(i=>JSON.parse(readFileSync(`artifacts/site-failure-032/candidate-${i}.json`)))]){const d=l.settlement.docks[0],depth=(x,z)=>[[0,0],[3,0],[-3,0],[0,3],[0,-3]].map(([dx,dz])=>+(t.level-t.height(x+dx,z+dz)).toFixed(3));console.log(JSON.stringify({position:l.position,dock:d,depth:depth(d.water.x,d.water.z),ray:Array.from({length:8},(_,i)=>{const dx=d.water.x-d.land.x,dz=d.water.z-d.land.z,len=Math.hypot(dx,dz),x=d.water.x+dx/len*i*4,z=d.water.z+dz/len*i*4;return {x,z,depth:depth(x,z)};})}));}

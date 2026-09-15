@@ -1,6 +1,6 @@
 interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
 }
 
 interface ChatOptions {
@@ -10,6 +10,9 @@ interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  responseSchema?: Record<string, unknown>;
+  onProgress?: (characters: number) => void;
+  timeoutMs?: number;
 }
 
 export const assertLocalAiEndpoint = (endpoint: string): string => {
@@ -25,18 +28,20 @@ const normalizeEndpoint = (endpoint: string): string => assertLocalAiEndpoint(en
 
 export async function completeLocalChat(options: ChatOptions): Promise<string> {
   const url = `${normalizeEndpoint(options.endpoint)}/chat/completions`;
+  const signal = options.timeoutMs ? AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(options.timeoutMs)]) : options.signal;
   const body = {
       model: options.model,
       messages: options.messages,
       temperature: options.temperature ?? 0.7,
       max_tokens: options.maxTokens ?? 500,
-      stream: false,
+      stream: Boolean(options.onProgress),
   };
   const request = (jsonMode: boolean) => fetch(url, {
+    redirect: "error",
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(jsonMode ? { ...body, response_format: { type: "json_object" } } : body),
-    signal: options.signal,
+    body: JSON.stringify(jsonMode ? { ...body, response_format: options.responseSchema ? { type: "json_schema", json_schema: { name: "dndrom_response", strict: true, schema: options.responseSchema } } : { type: "json_object" } } : body),
+    signal,
   });
   let response = await request(true);
   // Several otherwise OpenAI-compatible local engines reject response_format.
@@ -46,6 +51,13 @@ export async function completeLocalChat(options: ChatOptions): Promise<string> {
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(`Local AI returned ${response.status}${detail ? `: ${detail.slice(0, 180)}` : ""}`);
+  }
+  if(options.onProgress&&response.headers.get('content-type')?.includes('text/event-stream')){
+    if(!response.body)throw new Error('Local AI returned no response stream');
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',content='',characters=0,finished=false;
+    const consume=(line:string)=>{if(!line.startsWith('data:'))return;const data=line.slice(5).trim();if(data==='[DONE]'){finished=true;return;}if(!data)return;let event;try{event=JSON.parse(data);}catch{return;}const delta=event.choices?.[0]?.delta;if(typeof delta?.content==='string')content+=delta.content;characters+=(delta?.content?.length??0)+(delta?.reasoning_content?.length??0);options.onProgress!(characters);};
+    try{while(true){const {done,value}=await reader.read();buffer+=decoder.decode(value,{stream:!done});if(buffer.length+content.length>2_000_000)throw new Error('Local AI response exceeded the planning limit');const lines=buffer.split(/\r?\n/);buffer=lines.pop()??'';for(const line of lines)consume(line);if(done){consume(buffer);break;}if(finished)break;}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+    if(!content)throw new Error('Local AI returned no message content');return content;
   }
   const payload = (await response.json()) as {
     choices?: { message?: { content?: string } }[];
@@ -57,6 +69,7 @@ export async function completeLocalChat(options: ChatOptions): Promise<string> {
 
 export async function streamLocalChat(options: ChatOptions, onDelta: (delta: string, accumulated: string) => void): Promise<string> {
   const response = await fetch(`${normalizeEndpoint(options.endpoint)}/chat/completions`, {
+    redirect: "error",
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

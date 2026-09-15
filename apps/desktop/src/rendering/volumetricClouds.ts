@@ -72,8 +72,11 @@ float cloudDensity(vec3 worldPosition) {
   vec3 wind = vec3(uTime * .00075, 0.0, uTime * .00034);
   vec3 macroUv = fract(worldPosition * vec3(.006, .021, .006) + wind);
   vec3 detailUv = fract(worldPosition * vec3(.024, .061, .024) - wind * 1.7);
-  float base = texture(uBaseNoise, macroUv).r;
-  float detail = texture(uDetailNoise, detailUv).r;
+  // PlayCanvas' GLSL-to-WGSL processor identifies volume texture accesses by
+  // their legacy function name. The generic texture function reaches WebGL but is
+  // emitted with the wrong overload on WebGPU.
+  float base = texture3D(uBaseNoise, macroUv).r;
+  float detail = texture3D(uDetailNoise, detailUv).r;
   float height = clamp((worldPosition.y - 28.0) / 24.0, 0.0, 1.0);
   float profile = smoothstep(0.0, .18, height) * (1.0 - smoothstep(.68, 1.0, height));
   return max(0.0, base * profile - mix(.7, .38, uCoverage) - detail * .2);

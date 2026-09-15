@@ -4,6 +4,18 @@ import { describe, expect, it, vi } from "vitest";
 import { formatGenerationDuration, GenerationProgress } from "./GenerationProgress";
 
 describe("generation progress", () => {
+  it('shows the full failure and stops claiming live progress',()=>{
+    const message='Mainland landing needs 11 supported parcels; this site supports only 3';
+    const {getByText,queryByText}=render(<GenerationProgress value={{status:'error',message,percent:40,startedAt:Date.now(),stageLabel:'Sites',reportedByEngine:true}}/>);
+    expect(getByText(message)).toBeTruthy();
+    expect(getByText('Stopped')).toBeTruthy();
+    expect(queryByText('Live progress from the local engine')).toBeNull();
+  });
+  it('does not present an invented percentage while the local model is planning',()=>{
+    const {getByRole,getByText}=render(<GenerationProgress value={{status:'running',message:'Reading scene requirements',percent:0,indeterminate:true,startedAt:Date.now(),stageLabel:'Scene planning'}} label="Planning activity"/>);
+    expect(getByRole('progressbar',{name:'Planning activity'}).hasAttribute('aria-valuenow')).toBe(false);
+    expect(getByText('Working')).toBeTruthy();
+  });
   it("shows a determinate, accessible local-generation state", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T20:00:42Z"));

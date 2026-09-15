@@ -8,6 +8,9 @@ import process from "node:process";
 const workspace = path.resolve(import.meta.dirname, "..");
 const executable = path.resolve(process.argv[2] ?? path.join(workspace, "target", "release", "dndrom-desktop.exe"));
 const timeoutMs = Number(process.env.DNDROM_SMOKE_TIMEOUT_MS ?? 20_000);
+const proceduralWorldPrompt = process.env.DNDROM_SMOKE_WORLD_PROMPT ?? "A bright swamp settlement with raised paths, a river, old trees, and a ruined bell tower";
+const proceduralWorldBiome = process.env.DNDROM_SMOKE_WORLD_BIOME ?? "swamp";
+const proceduralWorldSeed = Number(process.env.DNDROM_SMOKE_WORLD_SEED ?? 7241);
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -125,7 +128,8 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
         expression: `(() => ({ bootFailure: document.querySelector('.boot-failure')?.textContent?.trim() ?? '', page: document.querySelector('main')?.textContent?.trim().slice(0, 600) ?? document.body.textContent?.trim().slice(0, 600) ?? '', candidates: [...document.querySelectorAll(${JSON.stringify(selector)})].slice(-12).map((node) => node.textContent?.trim()) }))()`,
         returnByValue: true,
       });
-      throw new Error(`Could not find packaged UI control: ${text}. State: ${JSON.stringify({ page: context.result?.value, failures: failures.slice(-8) })}`);
+      const diagnosticFailures = [...failures.filter((message) => /TypeError|ReferenceError|NotFoundError|DnDRom .* failed/i.test(message)), ...failures.slice(-12)];
+      throw new Error(`Could not find packaged UI control: ${text}. State: ${JSON.stringify({ page: context.result?.value, failures: [...new Set(diagnosticFailures)] })}`);
     }
     await delay(150);
   };
@@ -145,7 +149,9 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
       if (value) return value;
       await delay(100);
     }
-    throw new Error(`Timed out waiting for packaged state: ${expression}. Last value: ${JSON.stringify(value)}${failures.length ? `\nWebView failures:\n- ${[...new Set(failures)].slice(-12).join("\n- ")}` : ""}`);
+    const uniqueFailures = [...new Set(failures)];
+    const diagnosticFailures = uniqueFailures.length <= 24 ? uniqueFailures : [...uniqueFailures.slice(0, 12), "... later failures ...", ...uniqueFailures.slice(-12)];
+    throw new Error(`Timed out waiting for packaged state: ${expression}. Last value: ${JSON.stringify(value)}${diagnosticFailures.length ? `\nWebView failures:\n- ${diagnosticFailures.join("\n- ")}` : ""}`);
   };
 
   await clickByText(".campaign-current-button", "The Ember Below");
@@ -158,6 +164,45 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText(".campaign-card-list button", "Resume");
   const campaignResumed = await evaluateValue("document.querySelector('.campaign-current-button')?.textContent?.includes('The Ember Below') ?? false");
   await evaluateValue(`(() => { document.querySelectorAll('.toast button').forEach((button) => button.click()); return true; })()`);
+
+  if (process.env.DNDROM_SMOKE_WORLD_ONLY === "1" || process.env.DNDROM_SMOKE_LEGACY_INTERIOR === "1") {
+    await clickByText("button", "Session");
+    await evaluateValue(`(() => { const select=[...document.querySelectorAll('.session-panel select')].find(s=>[...s.options].some(o=>o.value==='disabled')); if(!select)throw Error('Missing runtime selector'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,'disabled'); select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+  }
+  if (process.env.DNDROM_SMOKE_LEGACY_INTERIOR === "1") {
+    await command("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    failures.length = 0;
+    await clickByText(".generate-map-button", "Generate campaign");
+    const configured = await evaluateValue(`(() => {
+      const modal = document.querySelector('[aria-label="AI map generator"]');
+      const input = modal?.querySelector('textarea');
+      if (!(input instanceof HTMLTextAreaElement)) return false;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(input, 'A warm roadside tavern interior with a hearth');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    if (!configured) throw new Error("Could not configure the legacy tavern generator");
+    await clickByText('[aria-label="AI map generator"] button', "Generate only the current scene");
+    await waitForValue(`(() => { const canvas = document.querySelector('.tabletop-area .scene-viewport canvas[data-lighting-quality]'); return !document.querySelector('[aria-label="AI map generator"]') && canvas?.dataset.sceneClassification === 'interior-direct-forward' && canvas?.dataset.cameraFramePolicy === 'disabled-interior'; })()`, 30_000);
+    await delay(1400);
+    const legacyInterior = await evaluateValue(`(() => {
+      const canvas = document.querySelector('.tabletop-area .scene-viewport canvas[data-lighting-quality]');
+      const persisted = JSON.parse(localStorage.getItem('dndrom-campaign-v1') ?? '{}')?.state?.campaign?.map;
+      return {
+        name: persisted?.name ?? '', theme: persisted?.theme ?? '', classification: canvas?.dataset.sceneClassification ?? '',
+        cameraFrame: canvas?.dataset.cameraFramePolicy ?? '', cloudRendering: canvas?.dataset.worldCloudRendering ?? '',
+        objectRoots: Number(canvas?.dataset.worldObjectRoots ?? 0), enabledRoots: Number(canvas?.dataset.worldEnabledRoots ?? 0),
+        meshInstances: Number(canvas?.dataset.worldMeshInstances ?? 0), finiteBounds: Number(canvas?.dataset.worldFiniteBounds ?? 0),
+        renderBounds: canvas?.dataset.worldRenderBounds ?? '', runtimeMessages: ${JSON.stringify([])},
+      };
+    })()`);
+    legacyInterior.runtimeMessages = [...failures.filter((message) => /TypeError|ReferenceError|NotFoundError|createBindGroup|shader|GPUBufferBinding|WebGL.*(?:error|invalid)/i.test(message))];
+    if (process.env.DNDROM_SMOKE_LEGACY_INTERIOR_SCREENSHOT) {
+      const capture = await command("Page.captureScreenshot", { format: "png", fromSurface: true });
+      if (capture?.data) await writeFile(path.resolve(process.env.DNDROM_SMOKE_LEGACY_INTERIOR_SCREENSHOT), Buffer.from(capture.data, "base64"));
+    }
+    return { snapshot, interactions: { legacyInterior }, failures };
+  }
 
   await command("Emulation.setDeviceMetricsOverride", { width: 1800, height: 900, deviceScaleFactor: 1, mobile: false });
   await delay(180);
@@ -175,7 +220,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText(".quality-preset-grid button", "Performance");
   await clickByText(".display-settings-footer button", "Apply settings");
   await delay(700);
-  const performanceApplied = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { quality: canvas?.dataset.lightingQuality ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', antialiasing: canvas?.dataset.antialiasing ?? '', renderScale: Number(canvas?.dataset.renderScale ?? 0), depthOfField: canvas?.dataset.depthOfField ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
+  const performanceApplied = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { quality: canvas?.dataset.lightingQuality ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', antialiasing: canvas?.dataset.antialiasing ?? '', renderScale: Number(canvas?.dataset.renderScale ?? 0), depthOfField: canvas?.dataset.depthOfField ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
   const performanceScreenshot = process.env.DNDROM_SMOKE_PERFORMANCE_SCREENSHOT
     ? await command("Page.captureScreenshot", { format: "png", fromSurface: true })
     : null;
@@ -184,7 +229,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText(".quality-preset-grid button", "Balanced");
   await clickByText(".display-settings-footer button", "Apply settings");
   await delay(700);
-  const balancedApplied = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { quality: canvas?.dataset.lightingQuality ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', antialiasing: canvas?.dataset.antialiasing ?? '', renderScale: Number(canvas?.dataset.renderScale ?? 0), depthOfField: canvas?.dataset.depthOfField ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
+  const balancedApplied = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { quality: canvas?.dataset.lightingQuality ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', antialiasing: canvas?.dataset.antialiasing ?? '', renderScale: Number(canvas?.dataset.renderScale ?? 0), depthOfField: canvas?.dataset.depthOfField ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
   const balancedScreenshot = process.env.DNDROM_SMOKE_BALANCED_SCREENSHOT
     ? await command("Page.captureScreenshot", { format: "png", fromSurface: true })
     : null;
@@ -193,7 +238,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText(".quality-preset-grid button", "Cinematic");
   await clickByText(".display-settings-footer button", "Apply settings");
   await delay(900);
-  const cinematicApplied = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { quality: canvas?.dataset.lightingQuality ?? '', depthOfField: canvas?.dataset.depthOfField ?? '', focusRange: Number(canvas?.dataset.depthOfFieldRange ?? 0), focusMode: canvas?.dataset.depthOfFieldFocusMode ?? '', focusTargets: Number(canvas?.dataset.depthOfFieldTargets ?? 0), blurRadius: Number(canvas?.dataset.depthOfFieldBlurRadius ?? 0), nearBlur: canvas?.dataset.depthOfFieldNearBlur ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
+  const cinematicApplied = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { quality: canvas?.dataset.lightingQuality ?? '', depthOfField: canvas?.dataset.depthOfField ?? '', focusRange: Number(canvas?.dataset.depthOfFieldRange ?? 0), focusMode: canvas?.dataset.depthOfFieldFocusMode ?? '', focusTargets: Number(canvas?.dataset.depthOfFieldTargets ?? 0), blurRadius: Number(canvas?.dataset.depthOfFieldBlurRadius ?? 0), nearBlur: canvas?.dataset.depthOfFieldNearBlur ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
   const cinematicScreenshot = process.env.DNDROM_SMOKE_CINEMATIC_SCREENSHOT
     ? await command("Page.captureScreenshot", { format: "png", fromSurface: true })
     : null;
@@ -205,7 +250,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
     : null;
   await clickByText(".display-settings-footer button", "Apply settings");
   await delay(1100);
-  const dioramaApplied = await evaluateValue(`(() => { const saved = JSON.parse(localStorage.getItem('dndrom.displaySettings.v1') ?? '{}'); const canvas = document.querySelector('.scene-viewport canvas'); return { saved: saved.quality === 'diorama', quality: canvas?.dataset.lightingQuality ?? '', display: canvas?.dataset.displayQuality ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', antialiasing: canvas?.dataset.antialiasing ?? '', renderScale: Number(canvas?.dataset.renderScale ?? 0), depthOfField: canvas?.dataset.depthOfField ?? '', focusRange: Number(canvas?.dataset.depthOfFieldRange ?? 0), focusMode: canvas?.dataset.depthOfFieldFocusMode ?? '', focusTargets: Number(canvas?.dataset.depthOfFieldTargets ?? 0), blurRadius: Number(canvas?.dataset.depthOfFieldBlurRadius ?? 0), nearBlur: canvas?.dataset.depthOfFieldNearBlur ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
+  const dioramaApplied = await evaluateValue(`(() => { const saved = JSON.parse(localStorage.getItem('dndrom.displaySettings.v1') ?? '{}'); const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { saved: saved.quality === 'diorama', quality: canvas?.dataset.lightingQuality ?? '', display: canvas?.dataset.displayQuality ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', antialiasing: canvas?.dataset.antialiasing ?? '', renderScale: Number(canvas?.dataset.renderScale ?? 0), depthOfField: canvas?.dataset.depthOfField ?? '', focusRange: Number(canvas?.dataset.depthOfFieldRange ?? 0), focusMode: canvas?.dataset.depthOfFieldFocusMode ?? '', focusTargets: Number(canvas?.dataset.depthOfFieldTargets ?? 0), blurRadius: Number(canvas?.dataset.depthOfFieldBlurRadius ?? 0), nearBlur: canvas?.dataset.depthOfFieldNearBlur ?? '', volumetricFog: canvas?.dataset.volumetricFog ?? '', postProcessGraph: canvas?.dataset.postProcessGraph ?? '' }; })()`);
   const dioramaScreenshot = process.env.DNDROM_SMOKE_DIORAMA_SCREENSHOT
     ? await command("Page.captureScreenshot", { format: "png", fromSurface: true })
     : null;
@@ -227,8 +272,10 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   const sceneResumed = await evaluateValue("document.querySelector('.scene-current-button small')?.textContent?.includes('of 2') ?? false");
   await clickByText(".map-toolbar button", "Square");
   await delay(220);
-  const gridShader = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { shape: canvas?.dataset.gridShape ?? '', projection: canvas?.dataset.gridProjection ?? '', visible: canvas?.dataset.gridVisible ?? '' }; })()`);
+  const gridShader = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { shape: canvas?.dataset.gridShape ?? '', projection: canvas?.dataset.gridProjection ?? '', visible: canvas?.dataset.gridVisible ?? '' }; })()`);
 
+  if (process.env.DNDROM_SMOKE_DISABLE_COMPUTE === "1") await evaluateValue(`localStorage.setItem('dndrom.render.disableCompute.v1', '1')`);
+  else await evaluateValue(`localStorage.removeItem('dndrom.render.disableCompute.v1')`);
   await clickByText("button", "AI scenery studio");
   const sceneryInspection = await evaluateValue(`(() => {
     const dialog = document.querySelector('[aria-label="AI Gaussian scenery studio"]');
@@ -236,7 +283,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
     const text = dialog.textContent ?? "";
     const rect = dialog.getBoundingClientRect();
     const edgeNode = document.elementFromPoint(rect.right - 8, rect.top + 18);
-    const canvas = dialog.querySelector('.scene-creator-stage canvas');
+    const canvas = dialog.querySelector('.scene-creator-stage canvas[data-lighting-quality]');
     const left = dialog.querySelector('.creator-sidebar-left');
     const right = dialog.querySelector('.creator-sidebar-right');
     const context = dialog.querySelector('.world-context-toggle');
@@ -258,18 +305,23 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   let proceduralWorld = null;
   let proceduralWorldScreenshot = null;
   if (process.env.DNDROM_SMOKE_PROCEDURAL_WORLD === "1") {
+    await delay(1000);
+    failures.length = 0;
     const promptSet = await evaluateValue(`(() => {
       const studio = document.querySelector('[aria-label="AI Gaussian scenery studio"]');
       const description = [...(studio?.querySelectorAll('textarea') ?? [])].find((entry) => entry.closest('label')?.textContent?.includes('Describe the world'));
       const biome = [...(studio?.querySelectorAll('select') ?? [])].find((entry) => entry.closest('label')?.textContent?.includes('Biome'));
       const size = [...(studio?.querySelectorAll('select') ?? [])].find((entry) => entry.closest('label')?.textContent?.includes('Size'));
-      if (!(description instanceof HTMLTextAreaElement) || !(biome instanceof HTMLSelectElement) || !(size instanceof HTMLSelectElement)) return false;
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(description, 'A bright swamp settlement with raised paths, a river, old trees, and a ruined bell tower');
+      const seed = [...(studio?.querySelectorAll('input[type="number"]') ?? [])].find((entry) => entry.closest('label')?.textContent?.includes('World seed'));
+      if (!(description instanceof HTMLTextAreaElement) || !(biome instanceof HTMLSelectElement) || !(size instanceof HTMLSelectElement) || !(seed instanceof HTMLInputElement)) return false;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(description, ${JSON.stringify(proceduralWorldPrompt)});
       description.dispatchEvent(new Event('input', { bubbles: true }));
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(biome, 'swamp');
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(biome, ${JSON.stringify(proceduralWorldBiome)});
       biome.dispatchEvent(new Event('change', { bubbles: true }));
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(size, 'medium');
       size.dispatchEvent(new Event('change', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(seed, ${JSON.stringify(String(proceduralWorldSeed))});
+      seed.dispatchEvent(new Event('input', { bubbles: true }));
       return true;
     })()`);
     if (!promptSet) throw new Error("Could not configure the packaged procedural-world prompt");
@@ -277,15 +329,27 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
     await clickByText('[aria-label="AI Gaussian scenery studio"] button', "Create two world plans");
     await waitForValue(`document.querySelectorAll('[aria-label="World concept review"] > button').length === 2`);
     await clickByText('[aria-label="AI Gaussian scenery studio"] button', "Build playable world");
-    await waitForValue(`(() => { const studio = document.querySelector('[aria-label="AI Gaussian scenery studio"]'); const canvas = studio?.querySelector('.scene-creator-stage canvas'); const visible = Number(canvas?.dataset.visibleWorldChunks ?? 0), resident = Number(canvas?.dataset.residentWorldChunks ?? 0); return Boolean(studio?.textContent?.includes('ValidationPassed') && canvas?.dataset.worldSun === 'directional-readability-floor' && visible === 64 && resident === visible); })()`, 90_000);
+    try {
+      await waitForValue(`(() => { const studio = document.querySelector('[aria-label="AI Gaussian scenery studio"]'); const canvas = studio?.querySelector('.scene-creator-stage canvas[data-lighting-quality]'); const visible = Number(canvas?.dataset.visibleWorldChunks ?? 0), resident = Number(canvas?.dataset.residentWorldChunks ?? 0); return Boolean(studio?.textContent?.includes('ValidationPassed') && canvas?.dataset.worldSun === 'directional-readability-floor' && visible > 0 && resident >= visible); })()`, Number(process.env.DNDROM_SMOKE_WORLD_TIMEOUT_MS ?? 90_000));
+    } catch (error) {
+      const diagnostic = await evaluateValue(`(() => { const studio = document.querySelector('[aria-label="AI Gaussian scenery studio"]'); const canvas = studio?.querySelector('.scene-creator-stage canvas[data-lighting-quality]'); return { text: (studio?.textContent ?? '').replace(/\\s+/g, ' ').slice(-1200), dataset: { ...canvas?.dataset } }; })()`);
+      process.stdout.write(`PACKAGED_WORLD_TIMEOUT_STATE ${JSON.stringify(diagnostic)}\n`);
+      if (process.env.DNDROM_SMOKE_WORLD_SCREENSHOT) {
+        const failedScreenshot = await command("Page.captureScreenshot", { format: "png", fromSurface: true });
+        if (failedScreenshot?.data) await writeFile(path.resolve(process.env.DNDROM_SMOKE_WORLD_SCREENSHOT), Buffer.from(failedScreenshot.data, "base64"));
+      }
+      throw error;
+    }
+    if (process.env.DNDROM_SMOKE_WORLD_ONLY === "1") process.stdout.write(`PACKAGED_WORLD_FAILURES_AFTER_BUILD ${failures.length}\n`);
+    if (process.env.DNDROM_SMOKE_WORLD_ONLY === "1") await waitForValue(`(() => { const canvas=document.querySelector('.scene-creator-stage canvas[data-lighting-quality]'); return canvas?.dataset.worldTerrainReady === 'true' && Number(canvas?.dataset.worldRevealRadius) >= 50000; })()`, 120_000);
     if (process.env.DNDROM_SMOKE_WORLD_ZOOM === "1") {
-      await evaluateValue(`(() => { const canvas = document.querySelector('[aria-label="AI Gaussian scenery studio"] .scene-creator-stage canvas'); if (!canvas) return false; for (let index = 0; index < 3; index++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -320, bubbles: true, cancelable: true })); return true; })()`);
+      await evaluateValue(`(() => { const canvas = document.querySelector('[aria-label="AI Gaussian scenery studio"] .scene-creator-stage canvas[data-lighting-quality]'); if (!canvas) return false; for (let index = 0; index < 3; index++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -320, bubbles: true, cancelable: true })); return true; })()`);
       await delay(650);
     }
     await delay(350);
     proceduralWorld = await evaluateValue(`(() => {
       const studio = document.querySelector('[aria-label="AI Gaussian scenery studio"]');
-      const canvas = studio?.querySelector('.scene-creator-stage canvas');
+      const canvas = studio?.querySelector('.scene-creator-stage canvas[data-lighting-quality]');
       return {
         concepts: studio?.querySelectorAll('[aria-label="World concept review"] > button').length ?? 0,
         validation: studio?.textContent?.includes('ValidationPassed') ?? false,
@@ -296,7 +360,9 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
         terrainPipeline: canvas?.dataset.worldTerrainPipeline ?? '',
         roadRendering: canvas?.dataset.worldRoadRendering ?? '',
         waterRendering: canvas?.dataset.worldWaterRendering ?? '',
+        waterTopology: canvas?.dataset.worldWaterTopology ?? '',
         grassRendering: canvas?.dataset.worldGrassRendering ?? '',
+        terrainNormals: canvas?.dataset.worldTerrainNormals ?? '',
         graphicsBackend: canvas?.dataset.graphicsBackend ?? '',
         worldCompute: canvas?.dataset.worldCompute ?? '',
         webgpuExposed: Boolean(navigator.gpu),
@@ -311,9 +377,17 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
         shadowDistance: Number(canvas?.dataset.shadowDistance ?? 0),
         animatedShaderTime: Number(canvas?.dataset.animatedShaderTime ?? 0),
         animatedShaderCount: Number(canvas?.dataset.animatedShaderCount ?? 0),
+        objectRoots: Number(canvas?.dataset.worldObjectRoots ?? 0),
+        enabledRoots: Number(canvas?.dataset.worldEnabledRoots ?? 0),
+        terrainRoots: Number(canvas?.dataset.worldTerrainRoots ?? 0),
+        renderComponents: Number(canvas?.dataset.worldRenderComponents ?? 0),
+        meshInstances: Number(canvas?.dataset.worldMeshInstances ?? 0),
+        finiteBounds: Number(canvas?.dataset.worldFiniteBounds ?? 0),
+        renderBounds: canvas?.dataset.worldRenderBounds ?? '',
+        camera: canvas?.dataset.worldCamera ?? '',
       };
     })()`);
-    const animationClip = await evaluateValue(`(() => { const rect = document.querySelector('[aria-label="AI Gaussian scenery studio"] .scene-creator-stage canvas')?.getBoundingClientRect(); return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 } : null; })()`);
+    const animationClip = await evaluateValue(`(() => { const rect = document.querySelector('[aria-label="AI Gaussian scenery studio"] .scene-creator-stage canvas[data-lighting-quality]')?.getBoundingClientRect(); return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 } : null; })()`);
     if (animationClip) {
       const animationBefore = await command("Page.captureScreenshot", { format: "png", fromSurface: true, clip: animationClip });
       await delay(650);
@@ -338,7 +412,43 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
       const closeScreenshot = await command("Page.captureScreenshot", { format: "png", fromSurface: true });
       if (closeScreenshot?.data) await writeFile(path.resolve(process.env.DNDROM_SMOKE_WORLD_CLOSE_SCREENSHOT), Buffer.from(closeScreenshot.data, "base64"));
     }
-    proceduralWorld.runtimeMessages = failures.slice(-12);
+    proceduralWorld.runtimeMessages = [...failures.slice(0, 20), ...failures.slice(-5)];
+    if (process.env.DNDROM_SMOKE_WORLD_PUBLISH === "1") {
+      failures.length = 0;
+      await clickByText('[aria-label="AI Gaussian scenery studio"] button', "Publish base world");
+      await delay(250);
+      await clickByText('[aria-label="AI Gaussian scenery studio"] button', "Tabletop");
+      await waitForValue(`(() => { const canvas = document.querySelector('.tabletop-area .scene-viewport canvas[data-lighting-quality]'); return Boolean(canvas && canvas.dataset.sceneClassification); })()`, 30_000);
+      await delay(1400);
+      proceduralWorld.published = await evaluateValue(`(() => {
+        const canvas = document.querySelector('.tabletop-area .scene-viewport canvas[data-lighting-quality]');
+        const persisted = JSON.parse(localStorage.getItem('dndrom-campaign-v1') ?? '{}')?.state?.campaign;
+        return {
+          activeSceneId: persisted?.activeSceneId ?? '',
+          activeMapName: persisted?.map?.name ?? '',
+          blueprintKind: persisted?.map?.generation?.blueprint?.kind ?? '',
+          worldChunks: persisted?.map?.world?.chunks?.length ?? 0,
+          classification: canvas?.dataset.sceneClassification ?? '',
+          cameraFrame: canvas?.dataset.cameraFramePolicy ?? '',
+          cloudRendering: canvas?.dataset.worldCloudRendering ?? '',
+          objectRoots: Number(canvas?.dataset.worldObjectRoots ?? 0),
+          enabledRoots: Number(canvas?.dataset.worldEnabledRoots ?? 0),
+          meshInstances: Number(canvas?.dataset.worldMeshInstances ?? 0),
+          finiteBounds: Number(canvas?.dataset.worldFiniteBounds ?? 0),
+          renderBounds: canvas?.dataset.worldRenderBounds ?? '',
+          runtimeMessages: ${JSON.stringify([])},
+        };
+      })()`);
+      proceduralWorld.published.runtimeMessages = failures.filter((message) => /TypeError|ReferenceError|NotFoundError|createBindGroup|shader|GPUBufferBinding|WebGL.*(?:error|invalid)/i.test(message));
+      if (process.env.DNDROM_SMOKE_PUBLISHED_WORLD_SCREENSHOT) {
+        const publishedScreenshot = await command("Page.captureScreenshot", { format: "png", fromSurface: true });
+        if (publishedScreenshot?.data) await writeFile(path.resolve(process.env.DNDROM_SMOKE_PUBLISHED_WORLD_SCREENSHOT), Buffer.from(publishedScreenshot.data, "base64"));
+      }
+    }
+    if (process.env.DNDROM_SMOKE_WORLD_ONLY === "1") {
+      process.stdout.write(`PACKAGED_WORLD_TELEMETRY ${JSON.stringify(proceduralWorld)}\n`);
+      return { snapshot, interactions: { proceduralWorld }, proceduralWorldScreenshotData: proceduralWorldScreenshot?.data, failures };
+    }
   }
   const fogEnabled = await evaluateValue(`(() => { const label = [...document.querySelectorAll('[aria-label="AI Gaussian scenery studio"] label')].find((node) => node.textContent?.includes('Fog of war')); const input = label?.querySelector('input[type="checkbox"]'); if (!input) return false; if (!input.checked) input.click(); return true; })()`);
   const sceneryStudio = sceneryInspection.ok && sceneryAutomaticSetup && sceneryInspection.width >= 700 && sceneryInspection.unclipped && sceneryInspection.canvasWidth >= 300 && sceneryInspection.canvasHeight >= 300 && sceneryInspection.contextReadable && sceneryInspection.sidebarsNoHorizontalOverflow;
@@ -353,7 +463,11 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   }
   await clickByText(".creator-page-actions button", "Tabletop");
   await delay(250);
-  const fogShader = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { pipeline: canvas?.dataset.fogMaskPipeline ?? '', channels: canvas?.dataset.fogMaskChannels ?? '', revealers: Number(canvas?.dataset.fogRevealerCount ?? 0) }; })()`);
+  const fogShader = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { pipeline: canvas?.dataset.fogMaskPipeline ?? '', channels: canvas?.dataset.fogMaskChannels ?? '', revealers: Number(canvas?.dataset.fogRevealerCount ?? 0) }; })()`);
+  if (process.env.DNDROM_SMOKE_WORLD_ONLY === "1") {
+    await clickByText("button", "Session");
+    await evaluateValue(`(() => { const select=[...document.querySelectorAll('.session-panel select')].find(s=>[...s.options].some(o=>o.value==='disabled')); if(!select)throw Error('Missing runtime selector'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,'disabled'); select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+  }
   await clickByText("button", "AI scenery studio");
   await evaluateValue(`(() => { const label = [...document.querySelectorAll('[aria-label="AI Gaussian scenery studio"] label')].find((node) => node.textContent?.includes('Fog of war')); const input = label?.querySelector('input[type="checkbox"]'); if (!input) return false; if (input.checked) input.click(); return true; })()`);
   await clickByText(".creator-page-actions button", "Tabletop");
@@ -432,12 +546,12 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   const newCharacterSafety = await evaluateValue(`(() => { const before = globalThis.__DNDROM_NEW_CHARACTER_SMOKE__; const persisted = JSON.parse(localStorage.getItem('dndrom-campaign-v1') ?? '{}')?.state; const page = document.querySelector('[aria-label="Character Forge"]'); const entityIds = persisted?.campaign?.map?.entities?.map((entry) => entry.id) ?? []; const tokenIds = persisted?.miniatureLibrary?.map((entry) => entry.id) ?? []; return { started: ${newCharacterStarted}, blank: Boolean(page?.textContent?.includes('Generate character now')) && !page?.querySelector('[aria-label="Character source artwork"] img'), campaignKept: persisted?.campaign?.id === before?.campaignId, sceneKept: persisted?.campaign?.activeSceneId === before?.activeSceneId, entitiesKept: JSON.stringify(entityIds) === JSON.stringify(before?.entityIds), catalogueKept: before?.tokenIds?.every((id) => tokenIds.includes(id)) ?? false, errorToast: Boolean(document.querySelector('.toast.error')) }; })()`);
   await clickByText(".creator-page-actions button", "Tabletop");
   await delay(2400);
-  const orbitBeforeBuild = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; for (let index = 0; index < 6; index++) { const x = rect.left + rect.width * .5, y = rect.top + rect.height * .5; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 2, pointerId: 70 + index, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 2, pointerId: 70 + index, clientX: x + 24, clientY: y + 9 })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 2, pointerId: 70 + index, clientX: x + 24, clientY: y + 9 })); } canvas.setPointerCapture = capture; return true; })()`);
+  const orbitBeforeBuild = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; for (let index = 0; index < 6; index++) { const x = rect.left + rect.width * .5, y = rect.top + rect.height * .5; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 2, pointerId: 70 + index, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 2, pointerId: 70 + index, clientX: x + 24, clientY: y + 9 })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 2, pointerId: 70 + index, clientX: x + 24, clientY: y + 9 })); } canvas.setPointerCapture = capture; return true; })()`);
   await clickByText(".mode-switcher button", "Play");
   await delay(180);
   await clickByText(".mode-switcher button", "Build");
   await delay(900);
-  const buildTransitionSafety = await evaluateValue(`(() => { const previews = [...document.querySelectorAll('.token-asset-preview')]; return { orbit: ${orbitBeforeBuild}, bootFailure: Boolean(document.querySelector('.boot-failure')), tabletop: Boolean(document.querySelector('.scene-viewport canvas')), palette: Boolean(document.querySelector('.asset-palette')), queuedPreviews: previews.every((preview) => preview.getAttribute('data-render-policy') === 'stored-source-image') }; })()`);
+  const buildTransitionSafety = await evaluateValue(`(() => { const previews = [...document.querySelectorAll('.token-asset-preview')]; return { orbit: ${orbitBeforeBuild}, bootFailure: Boolean(document.querySelector('.boot-failure')), tabletop: Boolean(document.querySelector('.scene-viewport canvas[data-lighting-quality]')), palette: Boolean(document.querySelector('.asset-palette')), queuedPreviews: previews.every((preview) => preview.getAttribute('data-render-policy') === 'stored-source-image') }; })()`);
   await clickByText(".miniature-library-button", "Character catalogue");
   const miniatureLibraryBefore = await evaluateValue(`(() => { const dialog = document.querySelector('[aria-label="Character catalogue"]'); const text = dialog?.textContent ?? ''; const preview = dialog?.querySelector('.token-asset-preview'); const image = preview?.querySelector('img'); let visiblePixels = 0; if (image instanceof HTMLImageElement && image.naturalWidth) { const sample = document.createElement('canvas'); sample.width = image.naturalWidth; sample.height = image.naturalHeight; const context = sample.getContext('2d'); context?.drawImage(image, 0, 0); const pixels = context?.getImageData(0, 0, sample.width, sample.height).data ?? []; for (let index = 3; index < pixels.length; index += 16) if (pixels[index] > 24) visiblePixels += 1; } return { open: Boolean(dialog), hasToken: text.includes('New miniature'), inCampaign: text.includes('Available in Minis'), preview: Boolean(preview), snapshot: image instanceof HTMLImageElement && image.src.startsWith('data:image/png') && image.naturalWidth >= 128 && image.naturalHeight >= 82, visiblePixels, failed: preview?.classList.contains('failed') ?? false }; })()`);
   const tokenNeededCampaignAdd = await evaluateValue(`(() => { const card = [...document.querySelectorAll('[aria-label="Character catalogue"] article')].find((entry) => entry.querySelector('strong')?.textContent?.includes('New miniature')); const button = [...(card?.querySelectorAll('button') ?? [])].find((entry) => entry.textContent?.includes('Add to campaign')); if (button instanceof HTMLElement) button.click(); return Boolean(button); })()`);
@@ -470,21 +584,21 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   }
   const miniatureCard = await evaluateValue(`(() => { const card = [...document.querySelectorAll('.asset-card')].find((node) => node.textContent?.includes('New miniature')); const preview = card?.querySelector('.token-asset-preview'); const canvas = preview?.querySelector('canvas'); const image = preview?.querySelector('img'); let visiblePixels = 0; if (image instanceof HTMLImageElement && image.naturalWidth) { const sample = document.createElement('canvas'); sample.width = image.naturalWidth; sample.height = image.naturalHeight; const context = sample.getContext('2d'); context?.drawImage(image, 0, 0); const pixels = context?.getImageData(0, 0, sample.width, sample.height).data ?? []; for (let index = 3; index < pixels.length; index += 16) if (pixels[index] > 24) visiblePixels += 1; } return { exists: Boolean(card), active: card?.classList.contains('active') ?? false, actualModel: image instanceof HTMLImageElement && image.src.startsWith('data:image/png') && image.naturalWidth >= 128 && image.naturalHeight >= 82, visiblePixels, failed: preview?.classList.contains('failed') ?? false, stage: canvas?.dataset.thumbnailStage ?? 'snapshot', width: preview?.clientWidth ?? 0, height: preview?.clientHeight ?? 0 }; })()`);
   if (!miniatureCard.active) await clickByText(".asset-card", "New miniature");
-  const canvasForToken = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); if (!canvas) return false; const rect = canvas.getBoundingClientRect(); canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + rect.width * .72, clientY: rect.top + rect.height * .72 })); return true; })()`);
+  const canvasForToken = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); if (!canvas) return false; const rect = canvas.getBoundingClientRect(); canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + rect.width * .72, clientY: rect.top + rect.height * .72 })); return true; })()`);
   await delay(180);
   const miniatureFloorPlacement = await evaluateValue(`(() => { const status = document.querySelector('.ghost-status'); return { hasGhost: Boolean(status), valid: Boolean(status && !status.classList.contains('invalid')), text: status?.textContent ?? '' }; })()`);
-  const miniaturePlaced = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const x = rect.left + rect.width * .72, y = rect.top + rect.height * .72; const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 41, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 41, clientX: x, clientY: y })); canvas.setPointerCapture = capture; return true; })()`);
+  const miniaturePlaced = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const x = rect.left + rect.width * .72, y = rect.top + rect.height * .72; const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 41, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 41, clientX: x, clientY: y })); canvas.setPointerCapture = capture; return true; })()`);
   await delay(400);
   await clickByText(".asset-card", "Select");
-  await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const x = rect.left + rect.width * .72, y = rect.top + rect.height * .72; const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 42, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 42, clientX: x, clientY: y })); canvas.setPointerCapture = capture; return true; })()`);
+  await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const x = rect.left + rect.width * .72, y = rect.top + rect.height * .72; const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 42, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 42, clientX: x, clientY: y })); canvas.setPointerCapture = capture; return true; })()`);
   await delay(300);
-  const tokenRuntimeAuthoring = await evaluateValue(`(() => { const controls = document.querySelector('.token-state-controls'); const canvas = document.querySelector('.scene-viewport canvas'); const text = controls?.textContent ?? ''; const selects = controls?.querySelectorAll('select') ?? []; const attack = [...(controls?.querySelectorAll('button') ?? [])].find((button) => button.textContent?.includes('Primary attack')); if (attack instanceof HTMLElement) attack.click(); return { placed: ${miniaturePlaced}, inspector: Boolean(controls), forms: selects[0]?.querySelectorAll('option').length ?? 0, styles: selects[1]?.querySelectorAll('option').length ?? 0, motions: controls?.querySelectorAll('.token-animation-controls button').length ?? 0, independent: text.includes('shapeshift independently'), styleIndependent: text.includes('visual styles share this form'), runtime: canvas?.dataset.tokenAnimationRuntime ?? '', rotationPolicy: canvas?.dataset.tokenRotationPolicy ?? '', proceduralFallback: canvas?.dataset.proceduralMotionFallback ?? '', syntheticRotation: canvas?.dataset.syntheticTokenRotation ?? '', stateful: Number(canvas?.dataset.statefulTokens ?? 0) }; })()`);
+  const tokenRuntimeAuthoring = await evaluateValue(`(() => { const controls = document.querySelector('.token-state-controls'); const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); const text = controls?.textContent ?? ''; const selects = controls?.querySelectorAll('select') ?? []; const attack = [...(controls?.querySelectorAll('button') ?? [])].find((button) => button.textContent?.includes('Primary attack')); if (attack instanceof HTMLElement) attack.click(); return { placed: ${miniaturePlaced}, inspector: Boolean(controls), forms: selects[0]?.querySelectorAll('option').length ?? 0, styles: selects[1]?.querySelectorAll('option').length ?? 0, motions: controls?.querySelectorAll('.token-animation-controls button').length ?? 0, independent: text.includes('shapeshift independently'), styleIndependent: text.includes('visual styles share this form'), runtime: canvas?.dataset.tokenAnimationRuntime ?? '', rotationPolicy: canvas?.dataset.tokenRotationPolicy ?? '', proceduralFallback: canvas?.dataset.proceduralMotionFallback ?? '', syntheticRotation: canvas?.dataset.syntheticTokenRotation ?? '', stateful: Number(canvas?.dataset.statefulTokens ?? 0) }; })()`);
   await delay(180);
   let floorPanelSelection = null;
   for (const [xRatio, yRatio] of [[.5, .5], [.4, .54], [.6, .54], [.5, .62], [.34, .62], [.66, .62], [.28, .7], [.72, .7], [.12, .82], [.88, .82]]) {
-    await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const x = rect.left + rect.width * ${xRatio}, y = rect.top + rect.height * ${yRatio}; const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 51, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 51, clientX: x, clientY: y })); canvas.setPointerCapture = capture; return true; })()`);
+    await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); if (!(canvas instanceof HTMLCanvasElement)) return false; const rect = canvas.getBoundingClientRect(); const x = rect.left + rect.width * ${xRatio}, y = rect.top + rect.height * ${yRatio}; const capture = canvas.setPointerCapture; canvas.setPointerCapture = () => {}; canvas.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 51, clientX: x, clientY: y })); canvas.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 51, clientX: x, clientY: y })); canvas.setPointerCapture = capture; return true; })()`);
     await delay(80);
-    floorPanelSelection = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { assetId: canvas?.dataset.selectedAssetId ?? '', style: canvas?.dataset.selectionStyle ?? '' }; })()`);
+    floorPanelSelection = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { assetId: canvas?.dataset.selectedAssetId ?? '', style: canvas?.dataset.selectionStyle ?? '' }; })()`);
     if (/^(floor-|road-|water-)/.test(floorPanelSelection.assetId)) break;
   }
   await clickByText(".mode-switcher button", "Prop");
@@ -535,7 +649,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText("[role=dialog] button", "");
   await clickByText(".mode-switcher button", "Play");
   const playMode = await evaluateValue("Boolean(document.querySelector('.app-shell.mode-play') && document.querySelector('.play-party'))");
-  const playGridHidden = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); const gridControl = [...document.querySelectorAll('.map-toolbar button')].some((button) => button.textContent?.includes('Grid')); return canvas?.dataset.gridVisible === 'false' && !gridControl; })()`);
+  const playGridHidden = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); const gridControl = [...document.querySelectorAll('.map-toolbar button')].some((button) => button.textContent?.includes('Grid')); return canvas?.dataset.gridVisible === 'false' && !gridControl; })()`);
   const playHudInitiallyHidden = await evaluateValue("!document.querySelector('.play-hud')");
   await clickByText(".play-party > button", "Aria Thorn");
   await delay(180);
@@ -545,7 +659,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText(".quality-preset-grid button", "Diorama");
   await clickByText(".display-settings-footer button", "Apply settings");
   await delay(900);
-  const gameplayFocus = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { quality: canvas?.dataset.lightingQuality ?? '', mode: canvas?.dataset.depthOfFieldFocusMode ?? '', targets: Number(canvas?.dataset.depthOfFieldTargets ?? 0), range: Number(canvas?.dataset.depthOfFieldRange ?? 0), blurRadius: Number(canvas?.dataset.depthOfFieldBlurRadius ?? 0), nearBlur: canvas?.dataset.depthOfFieldNearBlur ?? '' }; })()`);
+  const gameplayFocus = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { quality: canvas?.dataset.lightingQuality ?? '', mode: canvas?.dataset.depthOfFieldFocusMode ?? '', targets: Number(canvas?.dataset.depthOfFieldTargets ?? 0), range: Number(canvas?.dataset.depthOfFieldRange ?? 0), blurRadius: Number(canvas?.dataset.depthOfFieldBlurRadius ?? 0), nearBlur: canvas?.dataset.depthOfFieldNearBlur ?? '' }; })()`);
   const gameplayFocusScreenshot = process.env.DNDROM_SMOKE_GAMEPLAY_FOCUS_SCREENSHOT
     ? await command("Page.captureScreenshot", { format: "png", fromSurface: true })
     : null;
@@ -623,22 +737,22 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   await clickByText(".quick-rolls button", "d20");
   await clickByText(".quick-rolls button", "d6");
   const stagedDice = await evaluateValue(`(() => { const tray = document.querySelector('.dice-tray'); return { expression: tray?.querySelector('.dice-tray-heading strong')?.textContent ?? '', chips: tray?.querySelectorAll('.dice-pool-chips > span').length ?? 0, count: [...(tray?.querySelectorAll('.quick-rolls button em') ?? [])].reduce((sum, node) => sum + Number(node.textContent ?? 0), 0), rollButton: Boolean(tray?.querySelector('.roll-dice-button:not(:disabled)')) }; })()`);
-  const priorThrowGeneration = await evaluateValue("Number(document.querySelector('.scene-viewport canvas')?.dataset.diceThrowGeneration ?? 0)");
+  const priorThrowGeneration = await evaluateValue("Number(document.querySelector('.scene-viewport canvas[data-lighting-quality]')?.dataset.diceThrowGeneration ?? 0)");
   await clickByText(".roll-dice-button", "Roll 3 dice");
   await delay(30);
   const rollToastShown = await evaluateValue("Boolean(document.querySelector('.toast.roll'))");
   for (let attempt = 0; attempt < 50; attempt++) {
-    const started = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); const generation = Number(canvas?.dataset.diceThrowGeneration ?? 0); const progress = Number(canvas?.dataset.diceRollProgress ?? -1); return generation > ${priorThrowGeneration} && progress > 0 && progress < 1; })()`);
+    const started = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); const generation = Number(canvas?.dataset.diceThrowGeneration ?? 0); const progress = Number(canvas?.dataset.diceRollProgress ?? -1); return generation > ${priorThrowGeneration} && progress > 0 && progress < 1; })()`);
     if (started) break;
     await delay(50);
   }
-  const earlyRollPose = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { progress: Number(canvas?.dataset.diceRollProgress ?? -1), quaternion: canvas?.dataset.diceRollQuaternion ?? '' }; })()`);
+  const earlyRollPose = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { progress: Number(canvas?.dataset.diceRollProgress ?? -1), quaternion: canvas?.dataset.diceRollQuaternion ?? '' }; })()`);
   await delay(460);
-  const middleRollPose = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); return { progress: Number(canvas?.dataset.diceRollProgress ?? -1), quaternion: canvas?.dataset.diceRollQuaternion ?? '' }; })()`);
+  const middleRollPose = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); return { progress: Number(canvas?.dataset.diceRollProgress ?? -1), quaternion: canvas?.dataset.diceRollQuaternion ?? '' }; })()`);
   let diceEffectsScreenshot = null;
   if (process.env.DNDROM_SMOKE_DICE_EFFECTS_SCREENSHOT) {
     for (let attempt = 0; attempt < 45; attempt++) {
-      const settled = await evaluateValue("Number(document.querySelector('.scene-viewport canvas')?.dataset.diceRollProgress ?? 0) >= 1");
+      const settled = await evaluateValue("Number(document.querySelector('.scene-viewport canvas[data-lighting-quality]')?.dataset.diceRollProgress ?? 0) >= 1");
       if (settled) break;
       await delay(100);
     }
@@ -649,11 +763,11 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   // Randomized rigid-body throws do not have a fixed settle duration. Wait on
   // the result state instead of racing the sum-merge animation on slower PCs.
   for (let attempt = 0; attempt < 90; attempt++) {
-    const merged = await evaluateValue("document.querySelector('.scene-viewport canvas')?.dataset.diceSumMerge === 'complete'");
+    const merged = await evaluateValue("document.querySelector('.scene-viewport canvas[data-lighting-quality]')?.dataset.diceSumMerge === 'complete'");
     if (merged) break;
     await delay(100);
   }
-  const physicalDice = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas'); const rect = canvas?.getBoundingClientRect(); const sum = document.querySelector('.dice-sum-reveal'); const screenX = Number(canvas?.dataset.diceScreenX ?? -1), screenY = Number(canvas?.dataset.diceScreenY ?? -1), spawnScreenX = Number(canvas?.dataset.diceSpawnScreenX ?? -1); return { count: Number(canvas?.dataset.diceThrows ?? 0), batchSize: Number(canvas?.dataset.diceBatchSize ?? 0), total: Number(canvas?.dataset.lastDiceTotal ?? 0), toast: Boolean(document.querySelector('.toast.roll')), diceButtons: document.querySelectorAll('.quick-rolls .dice-face').length, numbered: canvas?.dataset.diceNumbered === 'true', observedMotion: canvas?.dataset.diceObservedMotion === 'true', materialPolicy: canvas?.dataset.tabletopMaterialPolicy ?? '', miniaturePipeline: canvas?.dataset.miniatureMaterialPipeline ?? '', propPipeline: canvas?.dataset.propMaterialPipeline ?? '', resinTransmission: canvas?.dataset.resinTransmission ?? '', winningNumber: Number(canvas?.dataset.diceWinningNumber ?? 0), winningFaceGlow: canvas?.dataset.diceWinningFaceGlow ?? '', resultPresentation: canvas?.dataset.diceResultPresentation ?? '', sumMerge: canvas?.dataset.diceSumMerge ?? '', mergedTotal: Number(canvas?.dataset.diceMergedTotal ?? 0), sumOverlay: sum?.textContent ?? '', randomPhysics: canvas?.dataset.diceMotion === 'rapier-rigid-body-random-toss' && canvas?.dataset.dicePhysics === 'convex-hull-friction-restitution-collisions', rightEntry: spawnScreenX >= .78, innerBoard: canvas?.dataset.diceThrowZone === 'right-to-inner-board' && screenX >= .12 && screenX <= .78 && screenY >= .18 && screenY <= .82, scannedPbr: canvas?.dataset.scannedPbr ?? '', diceThemes: canvas?.dataset.diceThemes ?? '', surfaceEffects: canvas?.dataset.diceSurfaceEffects ?? '', trailEffects: canvas?.dataset.diceTrailEffects ?? '', particleSystem: canvas?.dataset.diceParticleSystem ?? '', impactEffect: canvas?.dataset.diceImpactEffect ?? '', cleanShadowPolicy: canvas?.dataset.cleanShadowPolicy ?? '', ambientModel: canvas?.dataset.ambientModel ?? '', skyAmbient: canvas?.dataset.skyAmbient ?? '', groundAmbient: canvas?.dataset.groundAmbient ?? '', practicalFalloff: canvas?.dataset.practicalLightFalloff ?? '', practicalShadowCasters: Number(canvas?.dataset.practicalShadowCasters ?? -1), lightProbeGrid: canvas?.dataset.lightProbeGrid ?? '', lightProbeCoefficients: canvas?.dataset.lightProbeCoefficients ?? '', ssaoPipeline: canvas?.dataset.ssaoPipeline ?? '', contactShadows: Number(canvas?.dataset.miniatureContactShadows ?? 0), contactShadowPolicy: canvas?.dataset.miniatureContactShadowPolicy ?? '', miniatureRim: canvas?.dataset.miniatureRimLighting ?? '', shadowFiltering: canvas?.dataset.shadowFiltering ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', shadowBias: Number(canvas?.dataset.shadowBias ?? 0), shadowNormalOffset: Number(canvas?.dataset.shadowNormalOffset ?? 0), shadowCascades: Number(canvas?.dataset.shadowCascades ?? 0), spawnScreenX, screenX, screenY, rectLeft: rect?.left, rectWidth: rect?.width, offsetWidth: canvas?.offsetWidth, bufferWidth: canvas?.width, dpr: window.devicePixelRatio, innerWidth: window.innerWidth }; })()`);
+  const physicalDice = await evaluateValue(`(() => { const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]'); const rect = canvas?.getBoundingClientRect(); const sum = document.querySelector('.dice-sum-reveal'); const screenX = Number(canvas?.dataset.diceScreenX ?? -1), screenY = Number(canvas?.dataset.diceScreenY ?? -1), spawnScreenX = Number(canvas?.dataset.diceSpawnScreenX ?? -1); return { count: Number(canvas?.dataset.diceThrows ?? 0), batchSize: Number(canvas?.dataset.diceBatchSize ?? 0), total: Number(canvas?.dataset.lastDiceTotal ?? 0), toast: Boolean(document.querySelector('.toast.roll')), diceButtons: document.querySelectorAll('.quick-rolls .dice-face').length, numbered: canvas?.dataset.diceNumbered === 'true', observedMotion: canvas?.dataset.diceObservedMotion === 'true', materialPolicy: canvas?.dataset.tabletopMaterialPolicy ?? '', miniaturePipeline: canvas?.dataset.miniatureMaterialPipeline ?? '', propPipeline: canvas?.dataset.propMaterialPipeline ?? '', resinTransmission: canvas?.dataset.resinTransmission ?? '', winningNumber: Number(canvas?.dataset.diceWinningNumber ?? 0), winningFaceGlow: canvas?.dataset.diceWinningFaceGlow ?? '', resultPresentation: canvas?.dataset.diceResultPresentation ?? '', sumMerge: canvas?.dataset.diceSumMerge ?? '', mergedTotal: Number(canvas?.dataset.diceMergedTotal ?? 0), sumOverlay: sum?.textContent ?? '', randomPhysics: canvas?.dataset.diceMotion === 'rapier-rigid-body-random-toss' && canvas?.dataset.dicePhysics === 'convex-hull-friction-restitution-collisions', rightEntry: spawnScreenX >= .78, innerBoard: canvas?.dataset.diceThrowZone === 'right-to-inner-board' && screenX >= .12 && screenX <= .78 && screenY >= .18 && screenY <= .82, scannedPbr: canvas?.dataset.scannedPbr ?? '', diceThemes: canvas?.dataset.diceThemes ?? '', surfaceEffects: canvas?.dataset.diceSurfaceEffects ?? '', trailEffects: canvas?.dataset.diceTrailEffects ?? '', particleSystem: canvas?.dataset.diceParticleSystem ?? '', impactEffect: canvas?.dataset.diceImpactEffect ?? '', cleanShadowPolicy: canvas?.dataset.cleanShadowPolicy ?? '', ambientModel: canvas?.dataset.ambientModel ?? '', skyAmbient: canvas?.dataset.skyAmbient ?? '', groundAmbient: canvas?.dataset.groundAmbient ?? '', practicalFalloff: canvas?.dataset.practicalLightFalloff ?? '', practicalShadowCasters: Number(canvas?.dataset.practicalShadowCasters ?? -1), lightProbeGrid: canvas?.dataset.lightProbeGrid ?? '', lightProbeCoefficients: canvas?.dataset.lightProbeCoefficients ?? '', ssaoPipeline: canvas?.dataset.ssaoPipeline ?? '', contactShadows: Number(canvas?.dataset.miniatureContactShadows ?? 0), contactShadowPolicy: canvas?.dataset.miniatureContactShadowPolicy ?? '', miniatureRim: canvas?.dataset.miniatureRimLighting ?? '', shadowFiltering: canvas?.dataset.shadowFiltering ?? '', shadowResolution: canvas?.dataset.shadowResolution ?? '', shadowBias: Number(canvas?.dataset.shadowBias ?? 0), shadowNormalOffset: Number(canvas?.dataset.shadowNormalOffset ?? 0), shadowCascades: Number(canvas?.dataset.shadowCascades ?? 0), spawnScreenX, screenX, screenY, rectLeft: rect?.left, rectWidth: rect?.width, offsetWidth: canvas?.offsetWidth, bufferWidth: canvas?.width, dpr: window.devicePixelRatio, innerWidth: window.innerWidth }; })()`);
   const screenshot = await command("Page.captureScreenshot", { format: "png", fromSurface: true });
   const assetPresentation = await evaluateValue(`(() => {
     const cards = [...document.querySelectorAll('.asset-card')];
@@ -665,7 +779,7 @@ const inspectPage = async (socket, smokeModelPath, smokeDrawingPath) => {
   })()`);
   await clickByText(".asset-card", "Stone Wall");
   const ghostPreview = await evaluateValue(`(() => {
-    const canvas = document.querySelector('.scene-viewport canvas');
+    const canvas = document.querySelector('.scene-viewport canvas[data-lighting-quality]');
     if (!canvas) return false;
     const rect = canvas.getBoundingClientRect();
     canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + rect.width * .52, clientY: rect.top + rect.height * .58 }));
@@ -739,18 +853,42 @@ const child = spawn(executable, [], {
 
 let socket;
 try {
+  smokeChecks: {
   const target = await waitForTarget(port, child);
   socket = await connectCdp(target.webSocketDebuggerUrl);
   const { snapshot, interactions, screenshotData, noGridScreenshotData, displaySettingsScreenshotData, performanceScreenshotData, balancedScreenshotData, cinematicScreenshotData, dioramaScreenshotData, gameplayFocusScreenshotData, sceneryScreenshotData, proceduralWorldScreenshotData, forgeScreenshotData, forgePaintScreenshotData, diceForgeScreenshotData, diceEffectsScreenshotData, characterSheetScreenshotData, characterBuilderScreenshotData, failures } = await inspectPage(socket, smokeModelPath, smokeDrawingPath);
+
+  if (process.env.DNDROM_SMOKE_LEGACY_INTERIOR === "1") {
+    const legacy = interactions.legacyInterior;
+    if (!legacy || legacy.theme !== "tavern" || legacy.classification !== "interior-direct-forward" || legacy.cameraFrame !== "disabled-interior" || legacy.objectRoots < 1 || legacy.enabledRoots < 1 || legacy.meshInstances < 1 || legacy.finiteBounds !== legacy.meshInstances || legacy.runtimeMessages.length) {
+      throw new Error(`Packaged legacy-interior smoke failed: ${JSON.stringify(legacy)}`);
+    }
+    console.log(`Packaged legacy-interior smoke passed: ${JSON.stringify(legacy)}`);
+    break smokeChecks;
+  }
   const uniqueFailures = [...new Set(failures)];
   if (!snapshot || snapshot.readyState !== "complete" || snapshot.rootChildren < 1 || !snapshot.rootText.includes("DnDRom")) {
     throw new Error(`Packaged UI did not boot. Snapshot: ${JSON.stringify(snapshot)}${uniqueFailures.length ? `\nWebView failures:\n- ${uniqueFailures.join("\n- ")}` : ""}`);
   }
   if (snapshot.bootStatus?.state !== "ready") throw new Error(`DnDRom did not report a ready boot: ${JSON.stringify(snapshot.bootStatus)}`);
+  if (process.env.DNDROM_SMOKE_WORLD_ONLY === "1") {
+    const expectedCompute = process.env.DNDROM_SMOKE_DISABLE_COMPUTE === "1" ? "webgl2-cpu-culling" : "webgpu-compute";
+    if (!interactions.proceduralWorld?.validation || interactions.proceduralWorld?.graphicsBackend !== "webgpu" || interactions.proceduralWorld?.worldCompute !== expectedCompute || interactions.proceduralWorld?.visibleChunks < 1 || interactions.proceduralWorld?.shaderFailures?.length) {
+      throw new Error(`Packaged WebGPU world smoke failed: ${JSON.stringify(interactions.proceduralWorld)}`);
+    }
+    if (process.env.DNDROM_SMOKE_WORLD_PUBLISH === "1" && (!interactions.proceduralWorld?.published?.activeSceneId || interactions.proceduralWorld.published.blueprintKind !== "interior" || interactions.proceduralWorld.published.classification !== "interior-direct-forward" || interactions.proceduralWorld.published.cameraFrame !== "disabled-interior" || interactions.proceduralWorld.published.enabledRoots < 1 || interactions.proceduralWorld.published.meshInstances < 1 || interactions.proceduralWorld.published.finiteBounds !== interactions.proceduralWorld.published.meshInstances || interactions.proceduralWorld.published.runtimeMessages.length)) {
+      throw new Error(`Packaged published-interior smoke failed: ${JSON.stringify(interactions.proceduralWorld.published)}`);
+    }
+    if (process.env.DNDROM_SMOKE_WORLD_SCREENSHOT && proceduralWorldScreenshotData) {
+      const proceduralWorldScreenshotPath = path.resolve(process.env.DNDROM_SMOKE_WORLD_SCREENSHOT);
+      await writeFile(proceduralWorldScreenshotPath, Buffer.from(proceduralWorldScreenshotData, "base64"));
+      console.log(`Packaged procedural-world screenshot: ${proceduralWorldScreenshotPath}`);
+    }
+  } else {
   if (!interactions.campaignLibraryOpen || !interactions.newCampaignCreated || !interactions.campaignResumed || !interactions.sceneLedgerOpen || !interactions.splitSceneCreated || !interactions.sceneResumed || !interactions.sceneryStudio || !interactions.characterForge || !interactions.hexSelected || !interactions.diceForge || !interactions.campaignCreator || !interactions.playMode || !interactions.playGridHidden) {
     throw new Error(`Packaged interaction smoke failed: ${JSON.stringify(interactions)}`);
   }
-  if (process.env.DNDROM_SMOKE_PROCEDURAL_WORLD === "1" && (interactions.proceduralWorld?.concepts !== 2 || !interactions.proceduralWorld?.validation || interactions.proceduralWorld?.sun !== "directional-readability-floor" || interactions.proceduralWorld?.sunIntensity < 1.45 || interactions.proceduralWorld?.visibleChunks < 1 || interactions.proceduralWorld?.residentChunks < interactions.proceduralWorld?.visibleChunks || interactions.proceduralWorld?.terrainPipeline !== "warped-fbm+thermal-erosion+one-meter-terraces+catmull-road-deformation" || interactions.proceduralWorld?.roadRendering !== "terrain-weightmap+feathered-spline-decal" || interactions.proceduralWorld?.waterRendering !== "gerstner+dual-normal+depth-beer+screen-refraction+probe-reflection+shore-foam" || interactions.proceduralWorld?.grassRendering !== "dense-landscape-mask+crossed-card-instancing+player-reactive-vertex-wind" || !["webgpu-compute", "webgl2-cpu-culling"].includes(interactions.proceduralWorld?.worldCompute) || interactions.proceduralWorld?.foliageRendering !== "space-colonization+noise-poisson+lod" || interactions.proceduralWorld?.buildingRendering !== "cga-footprint+floors+facade-modules" || interactions.proceduralWorld?.cloudRendering !== "fullscreen-perlin-worley-raymarch+beer-lighting" || interactions.proceduralWorld?.terrainShadows !== "cast-and-receive" || interactions.proceduralWorld?.vegetationWind !== "pbr-vertex-wind+player-bend+animated-shadow" || interactions.proceduralWorld?.bridgeCount < 1 || interactions.proceduralWorld?.shadowDistance < 200 || interactions.proceduralWorld?.animatedShaderTime <= 0 || interactions.proceduralWorld?.animatedShaderCount < 3 || interactions.proceduralWorld?.shaderFailures?.length || !interactions.proceduralWorld?.animationFrameChanged)) {
+  if (process.env.DNDROM_SMOKE_PROCEDURAL_WORLD === "1" && (interactions.proceduralWorld?.concepts !== 2 || !interactions.proceduralWorld?.validation || interactions.proceduralWorld?.sun !== "directional-readability-floor" || interactions.proceduralWorld?.sunIntensity < 1.45 || interactions.proceduralWorld?.visibleChunks < 1 || interactions.proceduralWorld?.residentChunks < interactions.proceduralWorld?.visibleChunks || interactions.proceduralWorld?.terrainPipeline !== "warped-fbm+particle-hydraulic+thermal-settling+soil-layers+one-meter-terraces" || interactions.proceduralWorld?.roadRendering !== "grade-limited-spline+single-terrain-weightmap" || interactions.proceduralWorld?.waterRendering !== "gerstner+dual-normal+depth-beer+probe-reflection+shore-foam" || interactions.proceduralWorld?.waterTopology !== "particle-discharge+momentum+shared-contour-surface" || interactions.proceduralWorld?.grassRendering !== "heightfield-root-locked+pbr-shadow-receiver+gpu-instanced-wind" || interactions.proceduralWorld?.terrainNormals !== "grass+dirt+rock+snow+road-weighted-normal-maps" || !["webgpu-compute", "webgl2-cpu-culling"].includes(interactions.proceduralWorld?.worldCompute) || interactions.proceduralWorld?.foliageRendering !== "space-colonization+separate-bark-leaf-pbr+animated-shadow-casters+lod" || interactions.proceduralWorld?.buildingRendering !== "cga-footprint+floors+facade-modules" || !["fullscreen-perlin-worley-raymarch+beer-lighting", "camera-frame-atmosphere"].includes(interactions.proceduralWorld?.cloudRendering) || interactions.proceduralWorld?.terrainShadows !== "cast-and-receive" || interactions.proceduralWorld?.vegetationWind !== "pbr-vertex-wind+player-bend+animated-shadow" || interactions.proceduralWorld?.bridgeCount < 1 || interactions.proceduralWorld?.shadowDistance < 200 || interactions.proceduralWorld?.animatedShaderTime <= 0 || interactions.proceduralWorld?.animatedShaderCount < 3 || interactions.proceduralWorld?.shaderFailures?.length || !interactions.proceduralWorld?.animationFrameChanged)) {
     throw new Error(`Packaged procedural-world prompt smoke failed: ${JSON.stringify(interactions.proceduralWorld)}`);
   }
   if (!interactions.headerLayout?.full?.sameRow || !interactions.headerLayout?.full?.noOverlap || !interactions.headerLayout?.full?.gearFarRight || interactions.headerLayout?.full?.height > 70 || !interactions.headerLayout?.compact?.secondRow || !interactions.headerLayout?.compact?.noOverlap || !interactions.headerLayout?.compact?.gearFarRight || interactions.headerLayout?.compact?.height < 100) {
@@ -927,13 +1065,15 @@ try {
     await writeFile(characterBuilderScreenshotPath, Buffer.from(characterBuilderScreenshotData, "base64"));
     console.log(`Packaged character builder screenshot: ${characterBuilderScreenshotPath}`);
   }
+  }
   console.log(`Packaged smoke passed: ${snapshot.rootText.replace(/\s+/g, " ").slice(0, 100)}`);
   if (uniqueFailures.length) console.log(`Non-fatal WebView messages:\n- ${uniqueFailures.join("\n- ")}`);
+  }
 } finally {
   socket?.close();
   child.kill();
   await delay(300);
   const resolvedProfile = path.resolve(smokeProfile);
   const expectedPrefix = path.join(path.resolve(os.tmpdir()), "dndrom-smoke-");
-  if (resolvedProfile.startsWith(expectedPrefix)) await rm(resolvedProfile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  if (resolvedProfile.startsWith(expectedPrefix)) console.log(`Review profile retained: ${resolvedProfile}`);
 }

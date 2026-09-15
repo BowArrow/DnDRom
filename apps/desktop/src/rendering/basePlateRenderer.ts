@@ -4,6 +4,8 @@ import { tokenBaseGeometry } from "../domain/tokenGeometry";
 import type { BasePlateAsset, BasePlateLayer, LightingQuality, MaterialAsset, PropAsset, TokenAsset, TokenBaseShape } from "../domain/types";
 import { getStoredPropModel } from "../persistence/propAssets";
 import { applyMaterialAsset } from "./customMaterialAsset";
+import { parseNativeGlb } from "../migration/nativeGlb";
+import { fitScenicBase, isScenicBaseSurface, sceneryHeightRatio } from "./scenicBaseGeometry";
 
 export interface BasePlateRenderOptions {
   app: pc.Application;
@@ -14,6 +16,8 @@ export interface BasePlateRenderOptions {
   reducedMotion: boolean;
   propAssets?: PropAsset[];
   materialAssets?: MaterialAsset[];
+  onFitWarning?: (message:string) => void;
+  onAnchorTopChanged?: (height: number, offset: { x: number; z: number }) => void;
 }
 
 export interface BasePlateRenderHandle {
@@ -78,8 +82,9 @@ export function renderBasePlate(options: BasePlateRenderOptions): BasePlateRende
   let remainingParticles = basePlateParticleBudget(options.quality, options.reducedMotion);
   const material = (hex: string, gloss?: number, glow?: number) => { const next = makeMaterial(hex, gloss, glow); materials.push(next); return next; };
 
-  addShape(options.app, root, shape, "Rules-locked plinth", material(recipe?.plinthColor ?? options.token.base.color, .54), diameter, height, height / 2);
-  addShape(options.app, root, shape, "Painted rim", material(recipe?.rimColor ?? options.token.base.accentColor, .68), diameter * .94, .026, height + .013);
+  let anchorTop = height + .06;
+  const plinth = addShape(options.app, root, shape, "Rules-locked plinth", material(recipe?.plinthColor ?? options.token.base.color, .54), diameter, height, height / 2);
+  const rim = addShape(options.app, root, shape, "Painted rim", material(recipe?.rimColor ?? options.token.base.accentColor, .68), diameter * .94, .026, height + .013);
   if (recipe) {
     for (const [index, layer] of recipe.layers.filter((entry) => entry.enabled && entry.kind !== "plinth").entries()) {
       if (layer.kind === "surface") {
@@ -95,6 +100,7 @@ export function renderBasePlate(options: BasePlateRenderOptions): BasePlateRende
               addDecoration(root, { ...layer, name: `Relink missing prop ${reusableProp.name}`, color: "#a13f51", position: { ...layer.position, y: height + .055 + layer.position.y } }, material("#a13f51", .3), index);
               return;
             }
+            const fit = isScenicBaseSurface(layer) ? fitScenicBase(parseNativeGlb({ bytes: contents }, reusableProp.id).parts.map(part => part.geometry), diameter, sceneryHeightRatio(recipe), recipe.standingPoint) : undefined;
             const asset = new pc.Asset(reusableProp.name, "container", { url: `memory://dndrom/baseplate/${encodeURIComponent(reusableProp.id)}.glb`, filename: reusableProp.filename, contents, size: reusableProp.byteLength });
             modelAssets.push(asset); options.app.assets.add(asset);
             const attach = () => {
@@ -111,9 +117,20 @@ export function renderBasePlate(options: BasePlateRenderOptions): BasePlateRende
               instance.setLocalScale(maxScale, shallowScale, maxScale);
               instance.setLocalPosition(layer.position.x - centerX * maxScale, height + .032 + layer.position.y - reusableProp.bounds.min.y * shallowScale, layer.position.z - centerZ * maxScale);
               root.addChild(instance);
+              if (fit) {
+                instance.setLocalEulerAngles(0, layer.rotation.y, 0);
+                instance.setLocalScale(fit.scale.x, fit.scale.y, fit.scale.z);
+                // Rotate the centering offset along with the plate.
+                const centered = new pc.Quat().setFromEulerAngles(0, layer.rotation.y, 0).transformVector(new pc.Vec3(fit.position.x, fit.position.y, fit.position.z));
+                instance.setLocalPosition(centered);
+                plinth.enabled = false; rim.enabled = false;
+                anchorTop = fit.anchorTop; const anchor = new pc.Quat().setFromEulerAngles(0, layer.rotation.y, 0).transformVector(new pc.Vec3(fit.anchorOffset.x, 0, fit.anchorOffset.z)); options.onAnchorTopChanged?.(anchorTop, {x:anchor.x,z:anchor.z});
+                options.onFitWarning?.(fit.exceedsHeightBudget ? 'This saved mesh exceeds the scenery height limit. Its proportions are preserved; regenerate a shallower reference for a low base.' : !fit.hasStandingSurface ? 'This mesh has no clear standing area. Regenerate it with a flat centre.' : '');
+                root.tags.add('scenic-surface-replacement');
+              }
             };
             asset.ready(attach); options.app.assets.load(asset);
-          });
+          }).catch(error => console.error('Scenic base could not be loaded; keeping its fallback base visible.', error));
           continue;
         }
         // Recipe-only decoration concepts are descriptive metadata. They must
@@ -145,7 +162,7 @@ export function renderBasePlate(options: BasePlateRenderOptions): BasePlateRende
   root.tags.add(`particle-budget:${basePlateParticleBudget(options.quality, options.reducedMotion)}`);
   return {
     root,
-    anchorTop: height + .06,
+    get anchorTop() { return anchorTop; },
     update: (dt) => {
       if (options.reducedMotion) return;
       for (const item of animated) {

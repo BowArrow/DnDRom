@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, CircleDot, Copy, Edit3, ImagePlus, Layers3, Leaf, LoaderCircle, MapPin, MinusCircle, Mountain, Rotate3D, RotateCcw, Save, Sparkles, Trash2, Upload, WandSparkles, Waves } from "lucide-react";
-import { compileScenicBasePlateImagePrompt, designBasePlateConcepts } from "../ai/basePlateDirector";
+import { compileScenicBasePlateImagePrompt, designBasePlateConcepts, prepareScenicImageConcepts } from "../ai/basePlateDirector";
+import { createScenicImageGuide, SCENIC_IMAGE_NEGATIVE } from "../ai/scenicImageGuide";
+import { parseNativeGlb } from "../migration/nativeGlb";
+import { validateScenicBase } from "../rendering/scenicBaseGeometry";
 import { generateBasePlateGlb } from "../ai/basePlate3dClient";
 import { loadBundledWorkflow } from "../ai/comfyWorkflowPreset";
 import { ensureLocalRuntime, runtimeProgressPercent } from "../ai/localRuntime";
@@ -14,11 +17,13 @@ import { storeBasePlateBinary } from "../persistence/basePlateAssets";
 import { storePropModel } from "../persistence/propAssets";
 import { AssetCatalogueDialog } from "./AssetCatalogueDialog";
 import { BasePlateAssetPreview } from "./StoredAssetPreview";
+import { sceneryHeightRatio } from "../rendering/scenicBaseGeometry";
 
 type AssignmentLevel = "default" | "form" | "campaign-character" | "campaign-token" | "scene-character" | "scene-token";
 
 interface BasePlateStudioProps {
   model: File | null;
+  initialBasePlate?: BasePlateAsset;
   tokenId?: string | null;
   characterId?: string;
   formId?: string;
@@ -78,18 +83,18 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
   const updateSettings = useCampaignStore((state) => state.updateSettings);
   const draftKey = `dndrom.baseplateDraft.v1:${campaign.id}:${props.tokenId ?? "new"}`;
   const restored = useMemo(() => { try { return JSON.parse(localStorage.getItem(draftKey) ?? "null") as { name: string; recipe: ReturnType<typeof createBasePlateRecipe> } | null; } catch { return null; } }, [draftKey]);
-  const [name, setName] = useState(restored?.name ?? `${props.characterName} scenic base`);
-  const [description, setDescription] = useState(restored?.recipe.description ?? `A scenic base that reflects ${props.characterName}'s current adventure.`);
-  const [recipe, setRecipe] = useState(restored?.recipe ?? removeSyntheticScenery(createBasePlateRecipe("grass")));
-  const [concepts, setConcepts] = useState<ScenicConcept[]>([createBasePlateRecipe("grass"), createBasePlateRecipe("tavern")].map((entry) => ({ recipe: removeSyntheticScenery(entry) })));
+  const [name, setName] = useState(restored?.name ?? props.initialBasePlate?.name ?? `${props.characterName} scenic base`);
+  const [description, setDescription] = useState(restored?.recipe.description ?? props.initialBasePlate?.description ?? `A scenic base that reflects ${props.characterName}'s current adventure.`);
+  const [recipe, setRecipe] = useState(restored?.recipe ?? props.initialBasePlate?.recipe ?? removeSyntheticScenery(createBasePlateRecipe("grass")));
+  const [concepts, setConcepts] = useState<ScenicConcept[]>([]);
   const [selectedConcept, setSelectedConcept] = useState(0);
   const [approved, setApproved] = useState(false);
   const [provider, setProvider] = useState<PropImageProvider>(campaign.settings.propImageProvider ?? "sana-local");
   const [progress, setProgress] = useState<GenerationProgressView | null>(null);
-  const [sourceImageStorageKey, setSourceImageStorageKey] = useState<string>();
-  const [generatedSource, setGeneratedSource] = useState<BasePlateAsset["source"]>("procedural");
+  const [sourceImageStorageKey, setSourceImageStorageKey] = useState<string | undefined>(props.initialBasePlate?.sourceImageStorageKey);
+  const [generatedSource, setGeneratedSource] = useState<BasePlateAsset["source"]>(props.initialBasePlate?.source ?? "procedural");
   const [selectedLayerId, setSelectedLayerId] = useState(recipe.layers[1]?.id ?? recipe.layers[0]?.id);
-  const [saved, setSaved] = useState<BasePlateAsset | null>(null);
+  const [saved, setSaved] = useState<BasePlateAsset | null>(props.initialBasePlate ?? null);
   const [catalogueOpen, setCatalogueOpen] = useState(false);
   const [assignment, setAssignment] = useState<AssignmentLevel>(props.formId ? "form" : "default");
   const [busy, setBusy] = useState(false);
@@ -104,7 +109,9 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
   const hasGeneratedMesh = recipe.layers.some((layer) => layer.kind === "prop" && Boolean(layer.propAssetId));
 
   useEffect(() => { localStorage.setItem(draftKey, JSON.stringify({ name, recipe: { ...recipe, description } })); }, [description, draftKey, name, recipe]);
-  useEffect(() => () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url)), []);
+  useEffect(() => () => { abortRef.current?.abort(); abortRef.current = null; objectUrls.current.forEach((url) => URL.revokeObjectURL(url)); }, []);
+
+  const clearConceptReview = () => { setConcepts([]); setSelectedConcept(0); setApproved(false); };
 
   const updateLayer = (update: Partial<BasePlateLayer>) => setRecipe((value) => validateBasePlateRecipe({ ...value, layers: value.layers.map((layer) => layer.id === selectedLayerId ? { ...layer, ...update } : layer) }));
   const applyConcept = (index: number) => { const next = concepts[index]?.recipe; if (!next) return; setSelectedConcept(index); setApproved(false); setRecipe(next); setDescription(next.description); setSelectedLayerId(next.layers[1]?.id ?? next.layers[0].id); };
@@ -120,7 +127,7 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
   const acceptImages = (files: File[]) => {
     const valid = files.filter((file) => file.type.startsWith("image/") && file.size <= 20 * 1024 * 1024).slice(0, 2);
     if (!valid.length) { props.onNotify("Use PNG, JPEG, or WebP images under 20 MB.", "error"); return; }
-    const recipes = valid.map((_, index) => index === 0 ? removeSyntheticScenery({ ...recipe, description }) : removeSyntheticScenery(createBasePlateRecipe(recipe.preset, description)));
+    const recipes = valid.map(() => removeSyntheticScenery({ ...recipe, description, layers: recipe.layers.filter(layer => layer.kind === "plinth") }));
     setReviewedConcepts(recipes, valid);
     setProgress({ status: "complete", message: "Uploaded concept ready. Approve it before Pixal3D conversion.", percent: 100, startedAt: Date.now(), stageLabel: "Human review required" });
   };
@@ -130,48 +137,53 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
     setProgress({ status: "running", message: "Reading the bounded current-adventure context", percent: 12, startedAt, stageLabel: "Prompt direction" });
     try {
       const result = await designBasePlateConcepts({ description, character: props.characterName, location: activeScene?.name, biome: campaign.map.theme, sceneTags: campaign.map.entities.flatMap((entity) => entity.tags ?? []).slice(0, 12), recentEvents: campaign.events.filter((event) => /resolved|travel|encounter/i.test(event.type)).slice(-3).map((event) => event.summary) }, campaign.settings, controller.signal);
-      const next = result.recipes.map(removeSyntheticScenery);
+      if (controller.signal.aborted || abortRef.current !== controller) throw new DOMException("Suggestion cancelled", "AbortError");
+      const next = result.recipes.map(entry => removeSyntheticScenery({...entry, sceneryHeightRatio:sceneryHeightRatio(recipe)}));
       setConcepts(next.map((entry) => ({ recipe: entry })));
       setSelectedConcept(0); setRecipe(next[0]); setDescription(next[0].description); setSelectedLayerId(next[0].layers[0].id);
       setProgress({ status: "complete", message: "Two prompt directions are ready. Generate images when the wording looks right.", percent: 100, startedAt, stageLabel: "Direction ready" });
       props.onNotify(result.warning ? "Prepared safe offline baseplate directions because the configured local language model was unavailable." : "Prepared two baseplate directions from the current adventure.", result.warning ? "warning" : "success");
     } catch (error) {
+      if (abortRef.current !== controller) return;
       const cancelled = error instanceof DOMException && error.name === "AbortError";
       const message = cancelled ? "Adventure suggestion cancelled" : error instanceof Error ? error.message : "Adventure suggestion failed";
       if (!cancelled) props.onNotify(message, "error");
       setProgress(cancelled ? null : { status: "error", message, percent: 0, startedAt, stageLabel: "Suggestion stopped" });
-    } finally { if (abortRef.current === controller) abortRef.current = null; setBusy(false); }
+    } finally { if (abortRef.current === controller) { abortRef.current = null; setBusy(false); } }
   };
   const generateConcepts = async () => {
     const controller = new AbortController(); abortRef.current = controller;
     const startedAt = Date.now(); setBusy(true); setApproved(false);
     try {
-      const recipes = [
-        removeSyntheticScenery({ ...recipe, description }),
-        removeSyntheticScenery({ ...(concepts[1]?.recipe ?? createBasePlateRecipe(recipe.preset, description)), description: concepts[1]?.recipe.description || description }),
-      ];
-      const prompts = recipes.map(compileScenicBasePlateImagePrompt);
+      const requests = prepareScenicImageConcepts(recipe, description);
+      const recipes = requests.map(request => request.recipe), prompts = requests.map(request => request.prompt);
+      const assertCurrent = () => { if (controller.signal.aborted || abortRef.current !== controller) throw new DOMException("Scenic generation cancelled", "AbortError"); };
+      setReviewedConcepts(recipes, []);
       const generated: File[] = [];
+      const acceptCandidate = (file: File) => { assertCurrent(); generated.push(file); setReviewedConcepts(recipes, generated); };
       if (provider === "krea-cloud") {
         setProgress({ status: "running", message: "Submitting two reviewed scenic-base image jobs", percent: 8, startedAt, stageLabel: "Concept images" });
-        generated.push(await generateHostedKreaCandidate(prompts[0], controller.signal), await generateHostedKreaCandidate(prompts[1], controller.signal));
+        for (const prompt of prompts) { assertCurrent(); acceptCandidate(await generateHostedKreaCandidate(prompt, controller.signal)); }
       } else {
         if (provider === "krea-local" && !campaign.settings.kreaCommunityLicenseAcceptedAt) throw new Error("Accept the Krea 2 community license under Settings → AI Providers before using the optional local pack");
         const route = resolvePropImageRoute(provider);
-        const runtime = await ensureLocalRuntime(route.feature!, (event) => setProgress({ status: "running", message: event.message, percent: Math.max(2, Math.round(runtimeProgressPercent(event) * .18)), startedAt, stageLabel: "Local image pack" }));
+        const runtime = await ensureLocalRuntime(route.feature!, (event) => { if (!controller.signal.aborted && abortRef.current === controller) setProgress({ status: "running", message: event.message, percent: Math.max(2, Math.round(runtimeProgressPercent(event) * .18)), startedAt, stageLabel: "Local image pack" }); });
+        assertCurrent();
         updateSettings({ comfyUiEndpoint: runtime.endpoint, propImageProvider: provider });
         const workflow = await loadBundledWorkflow(route.workflow!);
-        for (let index = 0; index < 2; index++) generated.push(await generateLocalPropCandidate(runtime.endpoint, prompts[index], workflow, index, controller.signal, (event) => setProgress({ status: "running", message: event.message, percent: Math.round(20 + index * 35 + event.percent * .34), startedAt, stageLabel: `Scenic image ${index + 1} of 2`, reportedByEngine: event.reportedByEngine })));
+        const guide = await createScenicImageGuide(recipe); assertCurrent();
+        for (let index = 0; index < 2; index++) { assertCurrent(); acceptCandidate(await generateLocalPropCandidate(runtime.endpoint, prompts[index], workflow, index, controller.signal, (event) => { if (!controller.signal.aborted && abortRef.current === controller) setProgress({ status: "running", message: event.message, percent: Math.round(20 + index * 35 + event.percent * .34), startedAt, stageLabel: `Scenic image ${index + 1} of 2`, reportedByEngine: event.reportedByEngine }); }, guide, false, {strength:.9,negativePrompt:SCENIC_IMAGE_NEGATIVE})); }
       }
-      setReviewedConcepts(recipes, generated);
+      assertCurrent();
       setProgress({ status: "complete", message: "Two scenic base images are ready. Approve one before creating geometry.", percent: 100, startedAt, stageLabel: "Human review required" });
       props.onNotify("Created two cohesive scenic-base images for review.", "success");
     } catch (error) {
+      if (abortRef.current !== controller) return;
       const cancelled = error instanceof DOMException && error.name === "AbortError";
       const message = cancelled ? "Scenic image generation cancelled" : error instanceof Error ? error.message : "Scenic image generation failed";
       if (!cancelled) props.onNotify(message, "error");
       setProgress(cancelled ? null : { status: "error", message, percent: 0, startedAt, stageLabel: "Generation stopped" });
-    } finally { if (abortRef.current === controller) abortRef.current = null; setBusy(false); }
+    } finally { if (abortRef.current === controller) { abortRef.current = null; setBusy(false); } }
   };
   const createScenicMesh = async () => {
     if (!selectedImage || !approved) { props.onNotify("Approve one scenic image before starting Pixal3D.", "warning"); return; }
@@ -181,25 +193,29 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
       const runtime = await ensureLocalRuntime("characterPixal3d", (event) => setProgress({ status: "running", message: event.message, percent: Math.round(runtimeProgressPercent(event) * .2), startedAt, stageLabel: "Pixal3D setup" }));
       const workflow = await loadBundledWorkflow("/workflows/pixal3d-character.json");
       const glb = await generateBasePlateGlb(runtime.endpoint, selectedImage, workflow, controller.signal, (event) => setProgress({ status: "running", message: event.message, percent: Math.min(96, event.percent), startedAt, stageLabel: "Pixal3D image to 3D", reportedByEngine: event.reportedByEngine }));
+      if (controller.signal.aborted || abortRef.current !== controller) throw new DOMException("Mesh generation cancelled", "AbortError");
+      validateScenicBase(parseNativeGlb({bytes:await glb.arrayBuffer()}, "base-validation").parts.map(part=>part.geometry),sceneryHeightRatio(recipe));
       const prompt = compileScenicBasePlateImagePrompt(recipe);
       const prop = await storePropModel(glb, { name: `${name} scenic mesh`, description, source: "pixal3d", profile: "tabletop", acceptedSurfaceTags: ["floor", "tabletop", "stack-top"], providedSurfaces: [], collisionMode: "none", forwardAnchor: { x: 0, y: 0, z: -1 }, behavior: { kind: "static" }, defaultPlacementScale: .8, sourceImage: selectedImage, prompt });
       savePropAsset(prop);
       const imageKey = await storeBasePlateBinary(selectedImage, "source");
+      if (controller.signal.aborted || abortRef.current !== controller) throw new DOMException("Mesh generation cancelled", "AbortError");
       setSourceImageStorageKey(imageKey); setGeneratedSource(provider === "krea-cloud" ? "cloud-ai" : "local-ai");
       setRecipe((value) => {
         const retained = value.layers.filter((layer) => layer.kind === "plinth");
-        const meshLayer: BasePlateLayer = { id: crypto.randomUUID(), name: "AI scenic mesh", kind: "prop", enabled: true, order: retained.length, propAssetId: prop.id, position: { x: 0, y: .015, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: .8, y: .8, z: .8 }, solid: false, overhang: .04, triangleCount: Math.min(prop.triangleCount, 6_000) };
+      const meshLayer: BasePlateLayer = { id: crypto.randomUUID(), name: "AI scenic mesh", kind: "prop", role: "base-surface", enabled: true, order: retained.length, propAssetId: prop.id, position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, solid: false, overhang: .04, triangleCount: Math.min(prop.triangleCount, 6_000) };
         setSelectedLayerId(meshLayer.id);
         return validateBasePlateRecipe({ ...value, layers: [...retained, meshLayer] });
       });
       setProgress({ status: "complete", message: "Pixal3D scenic mesh validated and added as one editable layer.", percent: 100, startedAt, stageLabel: "3D base ready" });
       props.onNotify("The approved image is now a validated scenic base mesh. Save a revision to keep it.", "success");
     } catch (error) {
+      if (abortRef.current !== controller) return;
       const cancelled = error instanceof DOMException && error.name === "AbortError";
       const message = cancelled ? "Scenic mesh generation cancelled" : error instanceof Error ? error.message : "Scenic mesh generation failed";
       if (!cancelled) props.onNotify(message, "error");
       setProgress(cancelled ? null : { status: "error", message, percent: 0, startedAt, stageLabel: "Generation stopped" });
-    } finally { if (abortRef.current === controller) abortRef.current = null; setBusy(false); }
+    } finally { if (abortRef.current === controller) { abortRef.current = null; setBusy(false); } }
   };
   const saveRevision = () => {
     if (!recipe.layers.some((layer) => layer.kind === "prop" && layer.propAssetId)) { props.onNotify("Create the approved concept with Pixal3D before saving this as a finished custom base.", "warning"); return; }
@@ -223,7 +239,7 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
     setSaved(target);
     props.onNotify(`${target.name} assigned at the ${assignment.replace("-", " ")} level.`, "success");
   };
-  const loadAsset = (asset: BasePlateAsset) => { setSaved(asset); setName(asset.name); setDescription(asset.description); setRecipe(structuredClone(asset.recipe)); setSourceImageStorageKey(asset.sourceImageStorageKey); setGeneratedSource(asset.source); setSelectedLayerId(asset.recipe.layers[1]?.id ?? asset.recipe.layers[0]?.id); };
+  const loadAsset = (asset: BasePlateAsset) => { clearConceptReview(); setSaved(asset); setName(asset.name); setDescription(asset.description); setRecipe(structuredClone(asset.recipe)); setSourceImageStorageKey(asset.sourceImageStorageKey); setGeneratedSource(asset.source); setSelectedLayerId(asset.recipe.layers[1]?.id ?? asset.recipe.layers[0]?.id); };
   const moveLayer = (layerId: string, direction: -1 | 1) => setRecipe((value) => reorderBasePlateLayer(value, layerId, direction));
   const deleteLayer = (layerId: string) => setRecipe((value) => {
     const next = removeBasePlateLayer(value, layerId);
@@ -232,15 +248,16 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
   });
 
   return <section className="baseplate-studio" aria-label="Scenic Baseplate Creator">
-    <header className="creator-studio-header"><button onClick={props.onClose}><ArrowLeft size={15} /> Character Forge</button><div><span className="eyebrow"><CircleDot size={13} /> Scenic baseplate creator</span><h1>Build a physical story beneath the miniature</h1><p>Generate a cohesive image, approve it, then let Pixal3D build the scenic geometry.</p></div><button className="forge-catalogue-button" onClick={() => setCatalogueOpen(true)}><BookOpen size={14} /><span>Baseplate catalogue</span><small>{library.length} saved</small></button></header>
+    <header className="creator-studio-header"><button onClick={props.onClose}><ArrowLeft size={15} /> Character Forge</button><div><span className="eyebrow"><CircleDot size={13} /> Scenic baseplate creator</span><h1>Build a physical story beneath the miniature</h1><p>Generate a cohesive image, approve it, then let Pixal3D build the scenic geometry.</p></div><button className="forge-catalogue-button" disabled={busy} onClick={() => setCatalogueOpen(true)}><BookOpen size={14} /><span>Baseplate catalogue</span><small>{library.length} saved</small></button></header>
     <div className="baseplate-layout">
       <aside className="baseplate-panel fantasy-panel">
-        <h2>Concept image</h2><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Describe the complete base<textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={4} /></label>
-        <label>Starting terrain<select value={recipe.preset} onChange={(event) => { const next = removeSyntheticScenery(createBasePlateRecipe(event.target.value as BasePlatePreset, description)); setRecipe(next); setSelectedLayerId(next.layers[0]?.id); }}>{BASE_PLATE_PRESETS.map((preset) => <option key={preset} value={preset}>{basePlatePresetName(preset)}</option>)}</select></label>
+        <h2>Concept image</h2><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Describe the complete base<textarea disabled={busy} value={description} onChange={(event) => { clearConceptReview(); setDescription(event.target.value); }} rows={4} /></label>
+        <label>Starting terrain<select disabled={busy} value={recipe.preset} onChange={(event) => { clearConceptReview(); const next = removeSyntheticScenery({ ...createBasePlateRecipe(event.target.value as BasePlatePreset, description), sceneryHeightRatio: sceneryHeightRatio(recipe) }); setRecipe(next); setSelectedLayerId(next.layers[0]?.id); }}>{BASE_PLATE_PRESETS.map((preset) => <option key={preset} value={preset}>{basePlatePresetName(preset)}</option>)}</select></label>
+        <label>Scenery height <output>{Math.round(sceneryHeightRatio(recipe)*100)}% of base width</output><input aria-label="Scenery height" disabled={busy} type="range" min=".04" max=".4" step=".01" value={sceneryHeightRatio(recipe)} onChange={event => { clearConceptReview(); setRecipe(value => ({...value, sceneryHeightRatio:Number(event.target.value)})); }} /><small>Shapes the local image reference. New 3D results are checked against this limit; existing meshes keep their proportions.</small></label>
         <button disabled={busy} onClick={() => void suggestFromAdventure()}><Sparkles size={15} /> Use current adventure as prompt</button>
-        <button className="primary-button" disabled={busy} onClick={() => void generateConcepts()}><WandSparkles size={15} /> {busy ? "Generating two concept images…" : "Generate two 3D-ready concepts"}</button>
-        <label>Image provider<select value={provider} onChange={(event) => { const next = event.target.value as PropImageProvider; setProvider(next); updateSettings({ propImageProvider: next }); }}><option value="sana-local">Sana 1.5 Lite - local</option><option value="krea-local">Krea 2 Turbo - local high-end</option><option value="krea-cloud">Krea API - hosted / separate billing</option></select></label>
-        <button onClick={() => uploadRef.current?.click()}><Upload size={15} /> Upload scenic concept</button><input ref={uploadRef} hidden type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => acceptImages([...event.target.files ?? []])} />
+        <button className="primary-button" disabled={busy} onClick={() => void generateConcepts()}><WandSparkles size={15} /> {busy ? "Generating two concept images…" : "Generate two base concepts"}</button>
+        <label>Image provider<select disabled={busy} value={provider} onChange={(event) => { const next = event.target.value as PropImageProvider; setProvider(next); updateSettings({ propImageProvider: next }); }}><option value="sana-local">Sana 1.5 Lite - local</option><option value="krea-local">Krea 2 Turbo - local high-end</option><option value="krea-cloud">Krea API - hosted / separate billing</option></select></label>
+        <button disabled={busy} onClick={() => uploadRef.current?.click()}><Upload size={15} /> Upload scenic concept</button><input ref={uploadRef} hidden disabled={busy} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => acceptImages([...event.target.files ?? []])} />
         {busy && <button onClick={() => abortRef.current?.abort()}>Cancel current job</button>}
         <small className="forge-guidance">AI creates the whole base as one intentional composition. You approve an image before Pixal3D runs. Hosted providers receive only this explicit base description.</small>
       </aside>
@@ -248,9 +265,10 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
         <div className="baseplate-camera-tabs"><button className={camera === "isometric" ? "active" : ""} onClick={() => setCamera("isometric")}>Isometric</button><button className={camera === "top" ? "active" : ""} onClick={() => setCamera("top")}>Top + clearance</button></div>
         <TokenModelPreview model={props.model} kind={props.kind} shape={props.shape} baseColor={props.baseColor} accentColor={props.accentColor} footprint={props.footprint} modelScale={props.modelScale} placementScale={props.placementScale} lighting={props.lighting} basePlate={previewBasePlate} cameraMode={camera} propAssets={propLibrary} materialAssets={materialLibrary} />
         {camera === "top" && recipe.footClearance.source === "manual" ? <FootMaskPainter radius={recipe.footClearance.radius} onStored={(maskStorageKey) => setRecipe((value) => ({ ...value, footClearance: { ...value.footClearance, maskStorageKey } }))} /> : camera === "top" && <div className="foot-clearance-overlay" style={{ width: `${recipe.footClearance.radius * 100}%`, aspectRatio: "1" }} aria-label="Protected foot clearance mask" />}
-        <div className="foot-clearance-legend"><span /><strong>Protected foot anchor</strong><small>Lowest 12% of mesh, 5% dilation; central 35% fallback shown</small></div>
-        <div className="baseplate-concepts" aria-label="Scenic image concepts">{concepts.map((concept, index) => <button key={`${concept.recipe.preset}-${index}`} className={selectedConcept === index ? "active" : ""} onClick={() => applyConcept(index)}>{concept.url ? <img src={concept.url} alt={`Scenic base concept ${index + 1}`} /> : <span className="concept-empty"><ImagePlus size={18} /></span>}<strong>Concept {index + 1}: {basePlatePresetName(concept.recipe.preset)}</strong><small>{concept.url ? "Generated image ready for review" : "Generate or upload an image"}</small></button>)}</div>
-        {selectedImage && <div className="baseplate-image-review"><img src={concepts[selectedConcept].url} alt="Selected scenic base concept" /><div><button className={approved ? "approved" : "primary-button"} onClick={() => setApproved((value) => !value)}><Check size={15} /> {approved ? "Approved for Pixal3D" : "Approve this image"}</button><button disabled={!approved || busy} onClick={() => void createScenicMesh()}><Rotate3D size={15} /> Create scenic base in 3D</button></div></div>}
+        <div className="foot-clearance-legend"><span /><strong>Protected foot anchor</strong><small>Standing area is checked on the base surface; use Top + clearance to inspect placement</small></div>
+        <div className="baseplate-concepts" aria-label="Scenic image concepts">{concepts.map((concept, index) => <button key={index} disabled={busy} title={concept.recipe.description} className={selectedConcept === index ? "active" : ""} onClick={() => applyConcept(index)}>{concept.url ? <img src={concept.url} alt={`Scenic base concept ${index + 1}`} /> : <span className="concept-empty"><ImagePlus size={18} /></span>}<strong>Concept {index + 1}: {concept.recipe.description}</strong><small>{concept.url ? "Image ready for review" : "Waiting for concept image"}</small></button>)}</div>
+        {selectedImage && <p>Check that the image has shallow scenery and a clear, low standing area. Image guidance is not a physical measurement; reject tall or obstructed concepts before 3D conversion.</p>}
+        {selectedImage && <div className="baseplate-image-review"><img src={concepts[selectedConcept].url} alt="Selected scenic base concept" /><div><button disabled={busy} className={approved ? "approved" : "primary-button"} onClick={() => setApproved((value) => !value)}><Check size={15} /> {approved ? "Approved for Pixal3D" : "Approve this image"}</button><button disabled={!approved || busy} onClick={() => void createScenicMesh()}><Rotate3D size={15} /> Create scenic base in 3D</button></div></div>}
         {progress && <GenerationProgress value={progress} label="Scenic baseplate generation progress" />}
       </main>
       <aside className="baseplate-panel fantasy-panel">
@@ -258,6 +276,7 @@ export function BasePlateStudio(props: BasePlateStudioProps) {
         <div className="baseplate-layer-list functional-layer-list">{recipe.layers.map((layer, index) => <div key={layer.id} className={selectedLayerId === layer.id ? "active" : ""}><button className="layer-select" title={`Edit ${layer.name}`} onClick={() => setSelectedLayerId(layer.id)}>{layerIcon(layer)}<span><strong>{layer.name}</strong><small>{layer.kind}{layer.materialAssetId ? " - PBR" : ""}{layer.propAssetId ? " - generated mesh" : ""}</small></span></button><button className="layer-order" disabled={layer.kind === "plinth" || index <= 1} aria-label={`Move ${layer.name} up`} title={layer.kind === "plinth" ? "The gameplay plinth is rules-locked" : "Move layer up"} onClick={() => moveLayer(layer.id, -1)}><ArrowUp size={11} /></button><button className="layer-order" disabled={layer.kind === "plinth" || index === recipe.layers.length - 1} aria-label={`Move ${layer.name} down`} title={layer.kind === "plinth" ? "The gameplay plinth is rules-locked" : "Move layer down"} onClick={() => moveLayer(layer.id, 1)}><ArrowDown size={11} /></button><button className="layer-remove" disabled={layer.kind === "plinth"} aria-label={`Remove ${layer.name}`} title={layer.kind === "plinth" ? "The gameplay plinth is rules-locked" : "Remove layer"} onClick={() => deleteLayer(layer.id)}><Trash2 size={11} /></button></div>)}</div>
         {selectedLayer && <fieldset className="baseplate-layer-editor"><legend>{layerIcon(selectedLayer)} {selectedLayer.name}</legend><label>Layer name<input value={selectedLayer.name} onChange={(event) => updateLayer({ name: event.target.value })} /></label>{selectedLayer.color && <label>Paint color<input type="color" value={selectedLayer.color} onChange={(event) => updateLayer({ color: event.target.value })} /></label>}{selectedLayer.kind === "surface" && <label>Reusable material<select value={selectedLayer.materialAssetId ?? ""} onChange={(event) => updateLayer({ materialAssetId: event.target.value || undefined })}><option value="">Procedural painted surface</option>{materialLibrary.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label>}{selectedLayer.kind === "decoration" && <label>Reusable prop<select value={selectedLayer.propAssetId ?? ""} onChange={(event) => updateLayer({ propAssetId: event.target.value || undefined, kind: event.target.value ? "prop" : "decoration" })}><option value="">Procedural detail</option>{propLibrary.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label>}{selectedLayer.density !== undefined && <label>Density <span>{Math.round(selectedLayer.density * 100)}%</span><input type="range" min="0" max="1" step=".05" value={selectedLayer.density} onChange={(event) => updateLayer({ density: Number(event.target.value) })} /></label>}{selectedLayer.relief !== undefined && <label>Relief <span>{selectedLayer.relief.toFixed(2)}</span><input type="range" min="0" max=".25" step=".01" value={selectedLayer.relief} onChange={(event) => updateLayer({ relief: Number(event.target.value) })} /></label>}{selectedLayer.effect && <><label>Effect type<select value={selectedLayer.effect.kind} onChange={(event) => updateLayer({ effect: { ...selectedLayer.effect!, kind: event.target.value as typeof selectedLayer.effect.kind } })}><option value="water">Water normals</option><option value="foliage">Grass sway</option><option value="motes">Motes</option><option value="petals">Petals</option><option value="glow">Glow</option></select></label><label>Motion speed<input type="range" min="0" max="2" step=".05" value={selectedLayer.effect.speed} onChange={(event) => updateLayer({ effect: { ...selectedLayer.effect!, speed: Number(event.target.value) } })} /></label></>}</fieldset>}
         <fieldset><legend>Plinth & safety</legend><div className="token-color-row"><label>Plinth<input type="color" value={recipe.plinthColor} onChange={(event) => setRecipe((value) => ({ ...value, plinthColor: event.target.value }))} /></label><label>Rim<input type="color" value={recipe.rimColor} onChange={(event) => setRecipe((value) => ({ ...value, rimColor: event.target.value }))} /></label></div><label>Visual shape<select value={recipe.visualShape} onChange={(event) => setRecipe((value) => ({ ...value, visualShape: event.target.value as typeof value.visualShape }))}><option value="inherit">Inherit rules shape</option><option value="round">Round</option><option value="square">Square</option><option value="hex">Hex</option></select></label><label>Foot mask<select value={recipe.footClearance.source} onChange={(event) => setRecipe((value) => ({ ...value, footClearance: { ...value.footClearance, source: event.target.value as typeof value.footClearance.source } }))}><option value="mesh-lowest-12">Derive from lowest 12%</option><option value="fallback-ellipse">Central ellipse</option><option value="manual">Manual painted mask</option></select></label><label>Protected radius <span>{Math.round(recipe.footClearance.radius * 100)}%</span><input type="range" min=".18" max=".75" step=".01" value={recipe.footClearance.radius} onChange={(event) => setRecipe((value) => ({ ...value, footClearance: { ...value.footClearance, radius: Number(event.target.value) } }))} /></label>{recipe.footClearance.source === "manual" && <button title="The mask is stored locally with this baseplate"><CircleDot size={14} /> Paint mask in top view</button>}<small>Collision remains {props.shape}, {props.footprint.toFixed(2)} m. Solid layers are clipped inside it; non-solid overhang is capped at 8%.</small></fieldset>
+        {hasGeneratedMesh && <fieldset><legend>Standing position</legend><p>Automatic placement finds a low, supported patch. Adjust the preferred spot if your character should stand on a particular leaf or paving stone.</p>{(["x","z"] as const).map(axis=><label key={axis}>{axis === "x" ? "Left / right" : "Front / back"}<input aria-label={`Standing ${axis}`} type="range" min="-.3" max=".3" step=".01" value={recipe.standingPoint?.[axis] ?? 0} onChange={event=>setRecipe(value=>({...value,standingPoint:{x:value.standingPoint?.x??0,z:value.standingPoint?.z??0,[axis]:Number(event.target.value)}}))}/></label>)}<button onClick={()=>setRecipe(value=>({...value,standingPoint:undefined}))}>Find low standing area</button><small>Save a revision to keep this placement.</small></fieldset>}
         <fieldset><legend>Save & assign</legend><label>Assignment level<select value={assignment} onChange={(event) => setAssignment(event.target.value as AssignmentLevel)}><option value="default">Token default</option><option value="form">Current form</option><option value="campaign-character">Campaign character</option><option value="campaign-token">Campaign token</option><option value="scene-character">Scene character</option><option value="scene-token">Scene token</option></select></label><div className="baseplate-save-actions"><button disabled={!hasGeneratedMesh} title={hasGeneratedMesh ? "Save this generated mesh and recipe" : "Approve an image and create its Pixal3D mesh first"} onClick={saveRevision}><Save size={14} /> Save revision</button><button onClick={() => { setSaved(null); setName(`${name} copy`); }}><Copy size={14} /> Duplicate</button><button disabled={!saved?.revisions[1]} onClick={() => { const revision = saved?.revisions[1]; if (revision) setRecipe(structuredClone(revision.recipe)); }}><RotateCcw size={14} /> Restore</button><button className="primary-button" disabled={!saved || !hasGeneratedMesh} onClick={() => confirmAssignment()}><Check size={14} /> Confirm assignment</button></div></fieldset>
       </aside>
     </div>

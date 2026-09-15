@@ -811,31 +811,52 @@ dependencies = [
 
 [[package]]
 name = "dndrom-desktop"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "dndrom-domain",
- "fs2",
+ "dndrom-local-runtime",
  "keyring",
  "reqwest",
  "serde",
  "serde_json",
- "sevenz-rust2",
- "sha2 0.11.0",
  "tauri",
  "tauri-build",
  "thiserror 2.0.20",
- "windows-sys 0.61.2",
- "zip",
 ]
 
 [[package]]
 name = "dndrom-domain"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "rand 0.9.5",
  "serde",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "dndrom-local-runtime"
+version = "0.1.2"
+dependencies = [
+ "fs2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2 0.11.0",
+ "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
+name = "dndrom-runtime-host"
+version = "0.1.2"
+dependencies = [
+ "dndrom-domain",
+ "dndrom-local-runtime",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

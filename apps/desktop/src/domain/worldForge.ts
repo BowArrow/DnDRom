@@ -1,7 +1,11 @@
+import { worldWeatherSchema, weatherFromDescription } from "./worldWeather";
+import {siteIntentSchema,worldSiteSchema,inferSiteIntent,selectWorldSite,prepareWorldSite} from "./worldSite";
 import { z } from "zod";
+import { biomeAt } from "./worldGeography";
 import { DEFAULT_SCENE_LIGHTING } from "./lighting";
 
-export const WORLD_GENERATOR_REVISION = 8;
+export const WORLD_GENERATOR_REVISION = 23;
+import { fieldPlacementSurface, placeOnDryGround } from "./worldPlacement";
 import { inferMapTheme } from "./mapGenerator";
 import type {
   GameMap,
@@ -21,7 +25,10 @@ import type {
 import { buildAnisotropicRoadNetwork, buildNavigationGrid, buildWorldFieldSet, cornerCutPolyline, createHeightfield, distanceToSegment, generateBspRooms, gradeWorldFieldRoads, noiseWeightedPoissonPoints, sampleCatmullRomSpline, sampleTerrainHeight, sampleWorldField, simplexNoise2D, simplifyPolyline, terrainGeometryForChunk, terrainNoise } from "./worldProcedural";
 import { generateCgaBuilding, generateSpaceColonizedTree } from "./worldArchitecture";
 import { WORLD_VISUAL_CONFIG } from "./worldVisualConfig";
-import { denseGroundCoverPoints } from "./worldScatter";
+import { denseGroundCoverPoints, scatterVariation } from "./worldScatter";
+import {sampleSharedClimate,worldForestCandidates} from './worldClimate';
+import {worldClearing} from './sharedWorld';
+import { expandSceneRecipe, sceneCompositionSchema, sceneRecipeBounds } from "./sceneGrammar";
 
 export const WORLD_CHUNK_SIZE = 16 as const;
 export const WORLD_REGION_METERS: Record<WorldRegionSize, 64 | 128 | 256> = { small: 64, medium: 128, large: 256 };
@@ -29,6 +36,7 @@ export const MAX_WORLD_REPAIR_PASSES = 3;
 export const MAX_SCENE_TEMPLATE_REVISIONS = 8;
 
 const paletteSchema = z.object({ ground: z.string(), accent: z.string(), water: z.string() });
+const regionalBiomeSchema = z.object({ id: z.enum(["forest", "plains", "mountains", "coast", "swamp", "desert", "snow", "urban", "dungeon", "cavern"]), vegetationDensity: z.number().min(0).max(1), treeStyle: z.enum(["pine", "dead", "broadleaf", "cypress", "none"]), palette: paletteSchema });
 const zoneSchema = z.object({
   id: z.string().min(1).max(80), name: z.string().min(1).max(100),
   purpose: z.enum(["entry", "encounter", "landmark", "settlement", "wilderness", "interior", "secret", "exit"]),
@@ -42,7 +50,9 @@ const assetRequestSchema = z.object({
   resolvedAssetId: z.string().optional(), status: z.enum(["resolved", "placeholder", "pending-review", "approved"]),
 });
 
-export const worldBlueprintSchema: z.ZodType<WorldBlueprintV1> = z.object({
+export const worldBlueprintFields = z.object({
+  siteIntent:siteIntentSchema.optional(),site:worldSiteSchema.optional(),
+  weather: worldWeatherSchema.optional(),
   version: z.literal(1), id: z.string().min(1), name: z.string().min(1).max(100), description: z.string().min(1).max(2_000),
   seed: z.number().int().min(0).max(2_147_483_647), kind: z.enum(["interior", "exterior", "settlement", "dungeon"]),
   size: z.enum(["small", "medium", "large"]), width: z.union([z.literal(64), z.literal(128), z.literal(256)]),
@@ -51,12 +61,19 @@ export const worldBlueprintSchema: z.ZodType<WorldBlueprintV1> = z.object({
   mood: z.enum(["natural", "warm", "moonlight", "crypt", "desert"]),
   biome: z.object({ id: z.enum(["forest", "plains", "mountains", "coast", "swamp", "desert", "snow", "urban", "dungeon", "cavern"]), vegetationDensity: z.number().min(0).max(1), treeStyle: z.enum(["pine", "dead", "broadleaf", "cypress", "none"]), palette: paletteSchema }),
   terrain: z.object({ baseHeight: z.number().min(-10).max(30), relief: z.number().min(0).max(12), roughness: z.number().min(0).max(1), erosion: z.number().min(0).max(1), moisture: z.number().min(0).max(1), waterLevel: z.number().min(-10).max(30).optional(), roadMaterial: z.enum(["stone", "wood", "dirt"]) }),
+  biomeRegions: z.array(z.object({ id: z.string(), biome: regionalBiomeSchema, x: z.number().min(-1024).max(1024), z: z.number().min(-1024).max(1024), radius: z.number().min(1).max(1024), elevation: z.number().min(-10).max(60) })).max(32).optional(),
   zones: z.array(zoneSchema).min(2).max(24), assetRequests: z.array(assetRequestSchema).max(24),
+  architecture: z.object({ material: z.enum(["timber", "stone"]), ruin: z.number().min(0).max(1), density: z.number().min(.2).max(1) }).optional(),
+  composition: sceneCompositionSchema.optional(),
   presentation: z.object({ background: z.enum(["none", "panorama", "splat"]), prompt: z.string().max(2_000) }),
-}).superRefine((value, context) => {
+});
+
+export const worldBlueprintSchema: z.ZodType<WorldBlueprintV1> = worldBlueprintFields.superRefine((value, context) => {
   const expected = WORLD_REGION_METERS[value.size];
   if (value.width !== expected || value.depth !== expected) context.addIssue({ code: "custom", path: ["size"], message: "Region dimensions must match its size preset" });
   const zoneIds = new Set(value.zones.map((zone) => zone.id));
+  if (zoneIds.size !== value.zones.length) context.addIssue({ code: "custom", path: ["zones"], message: "Zone IDs must be unique" });
+  for (const zone of value.zones) if (Math.abs(zone.center.x) > value.width / 2 - 2 || Math.abs(zone.center.z) > value.depth / 2 - 2) context.addIssue({ code: "custom", path: ["zones"], message: "Zone centers must lie inside the region" });
   for (const zone of value.zones) for (const connection of zone.requiredConnections) if (!zoneIds.has(connection)) context.addIssue({ code: "custom", path: ["zones"], message: `Unknown zone connection ${connection}` });
 });
 
@@ -102,6 +119,8 @@ const inferKind = (description: string, theme: MapTheme): WorldRegionKind => /du
     : /inn|tavern|room|hall|interior|castle/i.test(description) ? "interior" : "exterior";
 
 const biomeFor = (theme: MapTheme, description: string): WorldBiomeSpec => {
+  // Setting and subject are independent: a forest village is still woodland.
+  if (/\b(forest|woodland|woods|jungle)\b/i.test(description) && !/\b(snow|frozen|arctic)\b/i.test(description)) return { id: "forest", vegetationDensity: /deep|dense|ancient|overgrown/i.test(description) ? .9 : .72, treeStyle: /pine|conifer/i.test(description) ? "pine" : "broadleaf", palette: { ground: "#3f5d3f", accent: "#78905d", water: "#355d66" } };
   if (/snow|frozen|ice|arctic/i.test(description)) return { id: "snow", vegetationDensity: .18, treeStyle: "pine", palette: { ground: "#b9c8ca", accent: "#6f8790", water: "#496b78" } };
   if (/desert|dune|sand/i.test(description)) return { id: "desert", vegetationDensity: .06, treeStyle: "none", palette: { ground: "#a67a48", accent: "#d4b173", water: "#397b84" } };
   if (theme === "swamp") return { id: "swamp", vegetationDensity: .72, treeStyle: "cypress", palette: { ground: "#334b35", accent: "#718454", water: "#263f3a" } };
@@ -137,7 +156,7 @@ const moodFor = (description: string, fallback: LightingMood = "natural"): Light
 const titleFor = (description: string, index: number): string => {
   const words = description.replace(/[^a-z0-9' -]/gi, " ").trim().split(/\s+/).filter(Boolean).slice(0, 6);
   const base = words.length ? words.map((word) => word[0].toUpperCase() + word.slice(1)).join(" ") : "Untitled Region";
-  return index === 0 ? base : `${base} · Alternate`;
+  return index === 0 ? base : `${base} Â· Alternate`;
 };
 
 const zonesFor = (size: number, kind: WorldRegionKind, seed: number): WorldZone[] => {
@@ -174,8 +193,10 @@ export function createFallbackWorldBlueprints(request: WorldForgeRequest): [Worl
       version: 1, id: stableId("blueprint", seed), name: titleFor(description, index), description, seed, kind,
       size: request.size, width: size, depth: size, chunkSize: WORLD_CHUNK_SIZE, gridShape: request.gridShape,
       theme, mood: moodFor(description, request.mood), biome: index === 0 ? biome : { ...biome, vegetationDensity: clamp(biome.vegetationDensity * .72 + .12, 0, 1) },
-      terrain: { baseHeight: 0, relief: kind === "interior" || kind === "dungeon" ? 0 : theme === "mountains" ? 10 : theme === "swamp" ? 4.8 : theme === "coast" ? 4 : biome.id === "plains" ? 4.5 : 5.5, roughness: index === 0 ? .48 : .64, erosion: .45, moisture: biome.id === "swamp" || biome.id === "coast" ? .85 : .42, waterLevel: biome.id === "swamp" || biome.id === "coast" ? .25 : undefined, roadMaterial: biome.id === "swamp" ? "wood" : kind === "settlement" ? "stone" : "dirt" },
+      siteIntent:inferSiteIntent(description,biome.id),
+      terrain: { baseHeight: 0, relief: kind === "interior" || kind === "dungeon" ? 0 : theme === "mountains" ? 10.5 : biome.id === "desert" ? 7.5 : theme === "swamp" ? 5.2 : theme === "coast" ? 4.8 : biome.id === "plains" ? 5.2 : 6.4, roughness: index === 0 ? .54 : .68, erosion: .48, moisture: biome.id === "swamp" || biome.id === "coast" ? .85 : biome.id === "desert" ? .08 : .42, waterLevel: biome.id === "swamp" || biome.id === "coast" ? .25 : undefined, roadMaterial: biome.id === "swamp" ? "wood" : kind === "settlement" ? "stone" : "dirt" },
       zones: zonesFor(size, kind, seed), assetRequests: defaultAssetRequests(kind, description, seed),
+      architecture: { material: /stone|gothic|citadel|fortress|ruin/i.test(description) ? "stone" : "timber", ruin: /\b(ruined|abandoned|shattered|destroyed|ruins)\b/i.test(description) ? .72 : 0, density: /city|capital|dense town/i.test(description) ? 1 : .6 },
       presentation: { background: request.background, prompt: `${description}. Distant environment only, clear navigable foreground, coherent horizon.` },
     });
   };
@@ -192,24 +213,6 @@ const terrainAsset = (blueprint: WorldBlueprintV1): string => blueprint.kind ===
 const treeAsset = (biome: WorldBiomeSpec, variation = 0): string => biome.treeStyle === "dead" ? "tree-dead"
   : biome.treeStyle === "broadleaf" ? (variation > .62 ? "tree-broadleaf-young" : "tree-broadleaf")
     : biome.treeStyle === "cypress" ? "tree-cypress" : variation > .72 ? "tree-pine-young" : "tree-pine";
-
-const chainDirectedSegments = <T extends { ax: number; az: number; bx: number; bz: number; flow: number }>(segments: T[]): T[][] => {
-  const key = (x: number, z: number) => `${x.toFixed(4)}:${z.toFixed(4)}`;
-  const byStart = new Map<string, T[]>(), incoming = new Set(segments.map((entry) => key(entry.bx, entry.bz)));
-  for (const segment of segments) byStart.set(key(segment.ax, segment.az), [...(byStart.get(key(segment.ax, segment.az)) ?? []), segment]);
-  const visited = new Set<T>(), chains: T[][] = [];
-  const trace = (first: T) => {
-    const chain: T[] = []; let current: T | undefined = first;
-    while (current && !visited.has(current)) {
-      visited.add(current); chain.push(current);
-      current = (byStart.get(key(current.bx, current.bz)) ?? []).filter((candidate) => !visited.has(candidate)).sort((left, right) => right.flow - left.flow)[0];
-    }
-    if (chain.length) chains.push(chain);
-  };
-  segments.filter((entry) => !incoming.has(key(entry.ax, entry.az))).sort((left, right) => right.flow - left.flow).forEach(trace);
-  segments.filter((entry) => !visited.has(entry)).sort((left, right) => right.flow - left.flow).forEach(trace);
-  return chains;
-};
 
 const simplifyRibbonControls = <T extends { x: number; y: number; z: number; width: number }>(points: T[], tolerance = .72): T[] => {
   if (points.length <= 2) return points;
@@ -271,34 +274,7 @@ const smoothRibbonPath = <T extends { x: number; y: number; z: number; width: nu
   return output;
 };
 
-type RibbonPoint = { x: number; y: number; z: number; width: number };
-
-/** Keep the spline continuous at streamed chunk borders. Curves are fitted to
- * the complete regional network first; chunks receive overlapping excerpts of
- * that finished curve instead of independently rounding D8 fragments. */
-const clipRibbonPaths = (paths: RibbonPoint[][], minX: number, maxX: number, minZ: number, maxZ: number, _margin = 2): RibbonPoint[][] => {
-  const clipped: RibbonPoint[][] = [];
-  for (const path of paths) {
-    let current: RibbonPoint[] = [];
-    for (let index = 0; index < path.length - 1; index++) {
-      const a = path[index], b = path[index + 1];
-      // A segment belongs to exactly one chunk by midpoint. Keeping both end
-      // points preserves the regional tangent across the boundary without
-      // drawing overlapping coplanar ribbons in neighboring chunks.
-      const midpointX = (a.x + b.x) * .5, midpointZ = (a.z + b.z) * .5;
-      const inside = midpointX >= minX && midpointX < maxX && midpointZ >= minZ && midpointZ < maxZ;
-      if (inside) {
-        if (!current.length) current.push(a);
-        current.push(b);
-      } else if (current.length) {
-        if (current.length > 1) clipped.push(current);
-        current = [];
-      }
-    }
-    if (current.length > 1) clipped.push(current);
-  }
-  return clipped;
-};
+type RibbonPoint = { x: number; y: number; z: number; width: number; tangentX?: number; tangentZ?: number };
 
 const buildSmoothRoadPaths = (roads: ReturnType<typeof buildAnisotropicRoadNetwork>, fields: ReturnType<typeof buildWorldFieldSet>, seed: number): RibbonPoint[][] => {
   const groups = new Map<string, typeof roads>();
@@ -313,8 +289,8 @@ const buildSmoothRoadPaths = (roads: ReturnType<typeof buildAnisotropicRoadNetwo
       { x: route[0].ax, z: route[0].az },
       ...route.map((entry) => ({ x: entry.bx, z: entry.bz })),
     ];
-    const controls = simplifyPolyline(raw, 1.05);
-    const curve = sampleCatmullRomSpline(cornerCutPolyline(controls, WORLD_VISUAL_CONFIG.roads.cornerCutIterations), WORLD_VISUAL_CONFIG.roads.splineSamplesPerSpan);
+    // Rendering, road grading and vegetation exclusion consume the SAME curve.
+    const curve = raw;
     paths.push(curve.map((point, index) => ({
       x: point.x,
       y: sampleWorldField(fields, "elevation", point.x, point.z) + .028,
@@ -328,27 +304,15 @@ const buildSmoothRoadPaths = (roads: ReturnType<typeof buildAnisotropicRoadNetwo
 
 interface BridgeSpan { ax: number; az: number; bx: number; bz: number; width: number; crossing: "river" | "lake" }
 
-const segmentIntersection = (a: RibbonPoint, b: RibbonPoint, c: RibbonPoint, d: RibbonPoint): boolean => {
-  const cross = (px: number, pz: number, qx: number, qz: number) => px * qz - pz * qx;
-  const abx = b.x - a.x, abz = b.z - a.z, cdx = d.x - c.x, cdz = d.z - c.z;
-  const denominator = cross(abx, abz, cdx, cdz);
-  if (Math.abs(denominator) < 1e-6) return false;
-  const acx = c.x - a.x, acz = c.z - a.z;
-  const t = cross(acx, acz, cdx, cdz) / denominator;
-  const u = cross(acx, acz, abx, abz) / denominator;
-  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
-};
-
 /** Derive exactly one deck from each true road/water crossing. River centerline
  * intersections and lake wet/dry transitions are authoritative; proximity to
  * a blue cell is not enough to manufacture a bridge. */
-const collectBridgeSpans = (roads: RibbonPoint[][], rivers: RibbonPoint[][], fields: ReturnType<typeof buildWorldFieldSet>, waterLevel?: number): BridgeSpan[] => {
+const collectBridgeSpans = (roads: RibbonPoint[][], fields: ReturnType<typeof buildWorldFieldSet>): BridgeSpan[] => {
   const candidates: BridgeSpan[] = [];
-  const riverSegments = rivers.flatMap((path) => path.slice(0, -1).map((point, index) => ({ a: point, b: path[index + 1], width: (point.width + path[index + 1].width) * .5 })));
   for (const path of roads) {
-    let run: { start: RibbonPoint; end: RibbonPoint; width: number; waterWidth: number; crossing: "river" | "lake" } | undefined;
-    const flush = () => {
-      if (!run) return;
+    let run: { start: RibbonPoint; end: RibbonPoint; width: number; waterWidth: number; crossing: "river" | "lake"; enteredFromDry: boolean } | undefined;
+    const flush = (exitedToDry: boolean) => {
+      if (!run || !run.enteredFromDry || !exitedToDry) { run = undefined; return; }
       const dx = run.end.x - run.start.x, dz = run.end.z - run.start.z, measured = Math.hypot(dx, dz);
       const fallbackA = path[Math.max(0, path.indexOf(run.start) - 1)] ?? run.start;
       const fallbackB = path[Math.min(path.length - 1, path.indexOf(run.end) + 1)] ?? run.end;
@@ -363,13 +327,14 @@ const collectBridgeSpans = (roads: RibbonPoint[][], rivers: RibbonPoint[][], fie
     };
     for (let index = 0; index < path.length - 1; index++) {
       const a = path[index], b = path[index + 1], midpointX = (a.x + b.x) * .5, midpointZ = (a.z + b.z) * .5;
-      const intersections = riverSegments.filter((river) => segmentIntersection(a, b, river.a, river.b));
-      const lakeWet = waterLevel !== undefined && sampleWorldField(fields, "waterElevation", midpointX, midpointZ) < waterLevel - .025;
-      const crossing = intersections.length > 0 || lakeWet;
-      if (!crossing) { flush(); continue; }
-      const waterWidth = Math.max(.8, ...intersections.map((entry) => entry.width));
-      const crossingKind = intersections.length ? "river" : "lake";
-      if (!run) run = { start: a, end: b, width: (a.width + b.width) * .5, waterWidth, crossing: crossingKind };
+      const samplePoints = [a, { x: midpointX, z: midpointZ }, b];
+      const masks = samplePoints.map((point) => sampleWorldField(fields, "waterMask", point.x, point.z));
+      const crossing = Math.max(...masks) > 0;
+      if (!crossing) { flush(true); continue; }
+      const stream = Math.max(...samplePoints.map((point) => sampleWorldField(fields, "streamMap", point.x, point.z)));
+      const crossingKind = stream > .18 ? "river" : "lake";
+      const waterWidth = Math.max(.8, Math.hypot(b.x - a.x, b.z - a.z));
+      if (!run) run = { start: a, end: b, width: (a.width + b.width) * .5, waterWidth, crossing: crossingKind, enteredFromDry: index === 0 ? masks[0] <= 0 : sampleWorldField(fields, "waterMask", path[index - 1].x, path[index - 1].z) <= 0 };
       else {
         run.end = b;
         run.width = Math.max(run.width, a.width, b.width);
@@ -377,7 +342,7 @@ const collectBridgeSpans = (roads: RibbonPoint[][], rivers: RibbonPoint[][], fie
         if (crossingKind === "river") run.crossing = "river";
       }
     }
-    flush();
+    flush(false);
   }
   // Converging routes can detect the same crossing. Keep the longer single
   // deck instead of stacking two coplanar bridge assets.
@@ -420,8 +385,13 @@ const repairZoneConnectivity = (input: WorldBlueprintV1): { blueprint: WorldBlue
 
 export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
   const parsed = worldBlueprintSchema.parse(input);
-  const repaired = repairZoneConnectivity(parsed);
+  const repaired = repairZoneConnectivity(parsed.site?parsed:prepareWorldSite(parsed));
   const blueprint = repaired.blueprint;
+  if(blueprint.siteIntent&&blueprint.kind!=="interior"&&blueprint.kind!=="dungeon"){
+    blueprint.site??=selectWorldSite(blueprint);
+    blueprint.terrain.baseHeight=0;
+    blueprint.terrain.waterLevel=blueprint.site.seaLevel-blueprint.site.datum;
+  }
   const entities: MapEntity[] = [];
   const chunks: WorldChunkDescriptor[] = [];
   const countX = blueprint.width / WORLD_CHUNK_SIZE, countZ = blueprint.depth / WORLD_CHUNK_SIZE;
@@ -432,49 +402,36 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
   // Half-metre regional authority gives roads, contour water and one-metre
   // gameplay terraces enough lateral resolution to read as landforms rather
   // than a 1 m cellular grid. Large regions keep the coarser authoring field.
-  const geologicalFields = buildWorldFieldSet(blueprint, blueprint.size === "large" ? 1 : .5);
-  if (blueprint.terrain.waterLevel !== undefined && blueprint.kind !== "interior" && blueprint.kind !== "dungeon") {
+  let geologicalFields = buildWorldFieldSet(blueprint, blueprint.size === "large" ? 1 : .5);
+  if (!blueprint.site && blueprint.terrain.waterLevel !== undefined && blueprint.kind !== "interior" && blueprint.kind !== "dungeon") {
     const sortedElevation = [...geologicalFields.waterElevation].sort((left, right) => left - right);
     const wetRatio = sortedElevation.filter((height) => height < blueprint.terrain.waterLevel!).length / sortedElevation.length;
     if (wetRatio > .28 || wetRatio < .015) {
       const targetRatio = blueprint.biome.id === "swamp" ? .16 : .09;
-      blueprint.terrain.waterLevel = sortedElevation[Math.floor((sortedElevation.length - 1) * targetRatio)];
-    }
-    const rawWaterElevation = [...geologicalFields.waterElevation];
-    const waterAt = (column: number, row: number) => rawWaterElevation[Math.max(0, Math.min(geologicalFields.resolution - 1, row)) * geologicalFields.resolution + Math.max(0, Math.min(geologicalFields.resolution - 1, column))];
-    for (let row = 0; row < geologicalFields.resolution; row++) for (let column = 0; column < geologicalFields.resolution; column++) {
-      geologicalFields.waterElevation[row * geologicalFields.resolution + column] = waterAt(column, row) * .4
-        + (waterAt(column - 2, row) + waterAt(column + 2, row) + waterAt(column, row - 2) + waterAt(column, row + 2)) * .1
-        + (waterAt(column - 2, row - 2) + waterAt(column + 2, row - 2) + waterAt(column - 2, row + 2) + waterAt(column + 2, row + 2)) * .05;
-    }
-    // The hydrology mask uses continuous eroded elevation while gameplay uses
-    // rounded terraces. Carve the authoritative terrain below every accepted
-    // wet sample so a rounded tier cannot pierce the lake surface and create
-    // false contour bands or z-fighting.
-    for (let index = 0; index < geologicalFields.elevation.length; index++) {
-      const waterDepth = blueprint.terrain.waterLevel - geologicalFields.waterElevation[index];
-      if (waterDepth <= .04) continue;
-      geologicalFields.elevation[index] = Math.min(geologicalFields.elevation[index], blueprint.terrain.waterLevel - clamp(.16 + waterDepth * .42, .16, 1.4));
+      const adjusted = sortedElevation[Math.floor((sortedElevation.length - 1) * targetRatio)];
+      if (Math.abs(adjusted - blueprint.terrain.waterLevel) > .001) {
+        blueprint.terrain.waterLevel = adjusted;
+        geologicalFields = buildWorldFieldSet(blueprint, blueprint.size === "large" ? 1 : .5);
+      }
     }
   }
   const hydrology = geologicalFields.hydrology;
-  const roads = buildAnisotropicRoadNetwork(blueprint, hydrology.riverSegments, Math.max(1, geologicalFields.cellSize * 2), geologicalFields);
-  const fields = gradeWorldFieldRoads(geologicalFields, roads);
-  const regionalRiverPaths: RibbonPoint[][] = chainDirectedSegments(hydrology.riverSegments).map((entries) => smoothRibbonPath([
-    { x: entries[0].ax, y: sampleWorldField(fields, "elevation", entries[0].ax, entries[0].az) + entries[0].depth * .72, z: entries[0].az, width: entries[0].width },
-    ...entries.map((entry) => ({
-      x: entry.bx,
-      y: sampleWorldField(fields, "elevation", entry.bx, entry.bz) + entry.depth * .72,
-      z: entry.bz,
-      width: entry.width * (.88 + simplexNoise2D(entry.bx * .075, entry.bz * .075, blueprint.seed + 8849) * .24),
-    })),
-  ], 8)).filter((path) => path.length > 1);
-  const regionalRoadPaths = buildSmoothRoadPaths(roads, fields, blueprint.seed);
-  const bridgeSpans = collectBridgeSpans(regionalRoadPaths, regionalRiverPaths, fields, blueprint.terrain.waterLevel);
+  const outdoor = blueprint.kind !== "interior" && blueprint.kind !== "dungeon";
+  const roads = outdoor && !blueprint.site?.shared ? buildAnisotropicRoadNetwork(blueprint, hydrology.riverSegments, Math.max(1, geologicalFields.cellSize * 2), geologicalFields) : [];
+  const fields = outdoor ? gradeWorldFieldRoads(geologicalFields, roads) : geologicalFields;
+  const regionalRoadPaths = outdoor ? buildSmoothRoadPaths(roads, fields, blueprint.seed) : [];
+  const bridgeSpans = outdoor ? collectBridgeSpans(regionalRoadPaths, fields) : [];
   const treeGeometryVariants = new Map<string, ReturnType<typeof generateSpaceColonizedTree>>();
+  const generateUnderstoryPrototype = (seed: number) => {
+    const key = 'understory:' + seed;
+    let prototype = treeGeometryVariants.get(key);
+    if (!prototype) { prototype = generateSpaceColonizedTree(seed, 'broadleaf'); treeGeometryVariants.set(key, prototype); }
+    return prototype;
+  };
   const paintedRoads = regionalRoadPaths.flatMap((path, pathIndex) => path.slice(0, -1).map((point, index) => ({
     ax: point.x, az: point.z, bx: path[index + 1].x, bz: path[index + 1].z,
     width: (point.width + path[index + 1].width) * .5,
+    bridge: [point,path[index+1],{x:(point.x+path[index+1].x)*.5,z:(point.z+path[index+1].z)*.5}].some(p=>sampleWorldField(fields,"waterMask",p.x,p.z)>-.08),
     fromZoneId: `paint-${pathIndex}`, toZoneId: `paint-${pathIndex}`,
   })));
   for (const zone of blueprint.zones) zone.center.y = sampleWorldField(fields, "elevation", zone.center.x, zone.center.z);
@@ -483,104 +440,70 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
     const chunkId = `chunk-${cx}-${cz}`;
     const x = -halfWidth + cx * WORLD_CHUNK_SIZE + WORLD_CHUNK_SIZE / 2;
     const z = -halfDepth + cz * WORLD_CHUNK_SIZE + WORLD_CHUNK_SIZE / 2;
+    const chunkBiome = biomeAt(blueprint, x, z);
     const flat = blueprint.kind === "interior" || blueprint.kind === "dungeon";
     const chunkMinX = x - WORLD_CHUNK_SIZE / 2, chunkMaxX = x + WORLD_CHUNK_SIZE / 2;
     const chunkMinZ = z - WORLD_CHUNK_SIZE / 2, chunkMaxZ = z + WORLD_CHUNK_SIZE / 2;
     const touchesChunk = (segment: { ax: number; az: number; bx: number; bz: number; width: number }, margin = 0) => Math.max(segment.ax, segment.bx) >= chunkMinX - segment.width - margin && Math.min(segment.ax, segment.bx) <= chunkMaxX + segment.width + margin && Math.max(segment.az, segment.bz) >= chunkMinZ - segment.width - margin && Math.min(segment.az, segment.bz) <= chunkMaxZ + segment.width + margin;
     const localRoads = paintedRoads.filter((road) => touchesChunk(road, 2));
-    const localRivers = hydrology.riverSegments.filter((river) => touchesChunk(river, river.width));
-    const geometry = terrainGeometryForChunk(blueprint, chunkMinX, chunkMinZ, localRoads, localRivers, fields);
+    const localRivers = flat ? [] : hydrology.riverSegments.filter((river) => touchesChunk(river, river.width));
+    const geometry = terrainGeometryForChunk({ ...blueprint, biome: chunkBiome }, chunkMinX, chunkMinZ, localRoads, localRivers, fields);
     const heightfield = createHeightfield(geometry, 33);
     const navigation = buildNavigationGrid(geometry, 16);
     const height = sampleTerrainHeight(geometry, x, z);
     const pathDistance = roads.reduce((nearest, road) => Math.min(nearest, distanceToSegment(x, z, road.ax, road.az, road.bx, road.bz)), Number.POSITIVE_INFINITY);
     const chunkEntities: MapEntity[] = [];
-    const terrain = entity(blueprint, chunkId, 0, terrainAsset(blueprint), `${blueprint.biome.id} terrain`, x, 0, z, 1, 0, ["world:terrain", `biome:${blueprint.biome.id}`]);
+    const terrain = entity(blueprint, chunkId, 0, terrainAsset(blueprint), `${chunkBiome.id} terrain`, x, 0, z, 1, 0, ["world:terrain", `biome:${chunkBiome.id}`]);
     terrain.worldGeometry = geometry;
-    chunkEntities.push(terrain);
+    // BSP rooms own their floors. A second full-region terrain skin was
+    // coplanar with those floors, caused z-fighting, and hid room materials in
+    // the Forge overview.
+    if (!flat) chunkEntities.push(terrain);
 
     // Water follows a half-meter elevation mask instead of flooding a whole
     // 16 m chunk when only its center is wet.
-    if (blueprint.terrain.waterLevel !== undefined) {
-      const waterCells = 64, waterSamples = waterCells + 1, waterCellSize = WORLD_CHUNK_SIZE / waterCells;
+    if (!flat && fields.waterMask.some((mask) => mask > 0)) {
+      const waterCells = blueprint.size === "large" ? 16 : 32, waterSamples = waterCells + 1, waterCellSize = WORLD_CHUNK_SIZE / waterCells;
       const wetCells: boolean[] = [];
       const depthField: number[] = [];
+      const surfaceHeights: number[] = [];
+      const sampledFlowVectors: number[] = [];
+      let containsRiver = false;
       for (let waterZ = 0; waterZ < waterSamples; waterZ++) for (let waterX = 0; waterX < waterSamples; waterX++) {
         const waterXPosition = chunkMinX + waterX * waterCellSize;
         const waterZPosition = chunkMinZ + waterZ * waterCellSize;
-        // A continuous Gaussian sample of the global erosion field gives
-        // marching squares a signed shoreline instead of a binary pixel mask.
-        const radius = .34;
-        const center = sampleWorldField(fields, "waterElevation", waterXPosition, waterZPosition) * 4;
-        const axial = sampleWorldField(fields, "waterElevation", waterXPosition - radius, waterZPosition)
-          + sampleWorldField(fields, "waterElevation", waterXPosition + radius, waterZPosition)
-          + sampleWorldField(fields, "waterElevation", waterXPosition, waterZPosition - radius)
-          + sampleWorldField(fields, "waterElevation", waterXPosition, waterZPosition + radius);
-        const diagonal = sampleWorldField(fields, "waterElevation", waterXPosition - radius, waterZPosition - radius)
-          + sampleWorldField(fields, "waterElevation", waterXPosition + radius, waterZPosition - radius)
-          + sampleWorldField(fields, "waterElevation", waterXPosition - radius, waterZPosition + radius)
-          + sampleWorldField(fields, "waterElevation", waterXPosition + radius, waterZPosition + radius);
-        const smoothedElevation = (center + axial * 2 + diagonal) / 16;
-        const bankVariation = (simplexNoise2D(waterXPosition * .11, waterZPosition * .11, blueprint.seed + 9973) - .5) * .08;
-        const depth = blueprint.terrain.waterLevel - .04 + bankVariation - smoothedElevation;
-        depthField.push(depth);
-        wetCells.push(depth > 0);
+        const waterMask = sampleWorldField(fields, "waterMask", waterXPosition, waterZPosition);
+        const physicalDepth = sampleWorldField(fields, "waterDepth", waterXPosition, waterZPosition);
+        const stream = sampleWorldField(fields, "streamMap", waterXPosition, waterZPosition);
+        const wet = waterMask > 0;
+        containsRiver ||= wet && stream > .18;
+        depthField.push(wet ? Math.max(.045, physicalDepth) : Math.min(-.025, waterMask * .28));
+        wetCells.push(wet);
+        surfaceHeights.push(sampleWorldField(fields, "waterSurface", waterXPosition, waterZPosition));
+        const momentumX = sampleWorldField(fields, "momentumX", waterXPosition, waterZPosition);
+        const momentumZ = sampleWorldField(fields, "momentumZ", waterXPosition, waterZPosition);
+        const momentumLength = Math.hypot(momentumX, momentumZ);
+        sampledFlowVectors.push(momentumLength > .0001 ? momentumX / momentumLength : 0, momentumLength > .0001 ? momentumZ / momentumLength : 0);
       }
       if (wetCells.some(Boolean)) {
         const shoreline: number[] = [], flowVectors: number[] = [];
-        // Two-pass chamfer distance to dry land: linear time and stable across
-        // machines, unlike scanning a 7x7 neighborhood for every water cell.
-        const shoreDistance: number[] = wetCells.map((wet, index) => {
-          const column = index % waterSamples, row = Math.floor(index / waterSamples);
-          return wet && column > 0 && row > 0 && column < waterSamples - 1 && row < waterSamples - 1 ? 99 : 0;
-        });
-        const relax = (index: number, other: number, cost: number) => { if (other >= 0 && other < shoreDistance.length) shoreDistance[index] = Math.min(shoreDistance[index], shoreDistance[other] + cost); };
-        for (let row = 0; row < waterSamples; row++) for (let column = 0; column < waterSamples; column++) {
-          const index = row * waterSamples + column;
-          if (column) relax(index, index - 1, 1);
-          if (row) relax(index, index - waterSamples, 1);
-          if (column && row) relax(index, index - waterSamples - 1, Math.SQRT2);
-        }
-        for (let row = waterSamples - 1; row >= 0; row--) for (let column = waterSamples - 1; column >= 0; column--) {
-          const index = row * waterSamples + column;
-          if (column < waterSamples - 1) relax(index, index + 1, 1);
-          if (row < waterSamples - 1) relax(index, index + waterSamples, 1);
-          if (column < waterSamples - 1 && row < waterSamples - 1) relax(index, index + waterSamples + 1, Math.SQRT2);
-        }
         for (let waterZ = 0; waterZ < waterSamples; waterZ++) for (let waterX = 0; waterX < waterSamples; waterX++) {
           const index = waterZ * waterSamples + waterX;
-          shoreline.push(wetCells[index] ? Math.max(0, 1 - (shoreDistance[index] - .5) / 2.5) : 0);
           const worldX = chunkMinX + waterX * waterCellSize, worldZ = chunkMinZ + waterZ * waterCellSize;
-          // Standing water follows a broad prevailing-wind field. Feeding the
-          // discrete D8 drainage direction into a lake exposed the hydrology
-          // grid as a maze of eight-direction ripple cells. River ribbons keep
-          // their true downstream tangent separately.
+          const mask = sampleWorldField(fields, "waterMask", worldX, worldZ);
+          shoreline.push(wetCells[index] ? 1 - smooth(clamp(mask / .5, 0, 1)) : 0);
+          const sampledFlowX = sampledFlowVectors[index * 2], sampledFlowZ = sampledFlowVectors[index * 2 + 1];
           const flowAngle = .72 + (terrainNoise(worldX * 1.8, worldZ * 1.8, blueprint.seed + 9917, .38) - .5) * 1.1;
-          flowVectors.push(Math.cos(flowAngle), Math.sin(flowAngle));
+          flowVectors.push(Math.hypot(sampledFlowX, sampledFlowZ) > .01 ? sampledFlowX : Math.cos(flowAngle), Math.hypot(sampledFlowX, sampledFlowZ) > .01 ? sampledFlowZ : Math.sin(flowAngle));
         }
-        const water = entity(blueprint, chunkId, 1000, "water-tile", "Elevation-masked shallow water", x, 0, z, 1, 0, ["world:water", "world:lake-mask", "non-colliding", "shader:animated-water"]);
-        water.worldGeometry = { kind: "water", originX: chunkMinX, originZ: chunkMinZ, size: WORLD_CHUNK_SIZE, waterLevel: blueprint.terrain.waterLevel - .06, resolution: waterCells, wetCells, depthField, shoreline, flowVectors };
+        const water = entity(blueprint, chunkId, 1000, "water-tile", "Shared discharge and pool surface", x, 0, z, 1, 0, ["world:water", "world:shared-hydrology-surface", ...(containsRiver ? ["world:river-field"] : ["world:lake-mask"]), "non-colliding", "shader:animated-water"]);
+        water.worldGeometry = { kind: "water", originX: chunkMinX, originZ: chunkMinZ, size: WORLD_CHUNK_SIZE, waterLevel: blueprint.terrain.waterLevel === undefined ? 0 : blueprint.terrain.waterLevel - .06, resolution: waterCells, wetCells, depthField, shoreline, surfaceHeights, flowVectors };
         chunkEntities.push(water);
       }
     }
-    const chunkRiverPaths = clipRibbonPaths(regionalRiverPaths, chunkMinX, chunkMaxX, chunkMinZ, chunkMaxZ, 1.8)
-      .filter((path) => path.some((point) => blueprint.terrain.waterLevel === undefined || sampleWorldField(fields, "waterElevation", point.x, point.z) >= blueprint.terrain.waterLevel - .04));
-    if (chunkRiverPaths.length) {
-      const river = entity(blueprint, chunkId, 1100, "water-tile", "Continuous downstream river", x, 0, z, 1, 0, ["world:water", "world:river", "world:ribbon", "non-colliding"]);
-      river.worldGeometry = {
-        kind: "river-ribbon", surface: "water", bankDepth: Math.max(.35, ...localRivers.map((entry) => entry.depth)), flowSpeed: .16,
-        paths: chunkRiverPaths,
-      };
-      chunkEntities.push(river);
-    }
-    // A feathered spline decal supplies sub-vertex edge detail while the same
-    // weight field remains authoritative for grading, navigation and foliage.
-    const chunkRoadPaths = clipRibbonPaths(regionalRoadPaths, chunkMinX, chunkMaxX, chunkMinZ, chunkMaxZ, 1.5);
-    if (chunkRoadPaths.length) {
-      const roadPaint = entity(blueprint, chunkId, 1140, "floor-dirt", "Terrain-blended spline road", x, 0, z, 1, 0, ["world:road", "world:ribbon", "render:spline-decal"]);
-      roadPaint.worldGeometry = { kind: "road-ribbon", surface: blueprint.terrain.roadMaterial, paths: chunkRoadPaths };
-      chunkEntities.push(roadPaint);
-    }
+    // The grade-limited regional spline is rasterized once into the terrain's
+    // soft road weight field. A second coplanar ribbon used to double the
+    // texture, create dark blotches at overlaps, and expose chunk joins.
     const ownedBridges = bridgeSpans.filter((bridge) => {
       const midpointX = (bridge.ax + bridge.bx) / 2, midpointZ = (bridge.az + bridge.bz) / 2;
       return midpointX >= chunkMinX && midpointX < chunkMaxX && midpointZ >= chunkMinZ && midpointZ < chunkMaxZ;
@@ -590,7 +513,10 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
       const length = Math.max(.5, Math.hypot(dx, dz));
       const midpointX = (bridge.ax + bridge.bx) / 2, midpointZ = (bridge.az + bridge.bz) / 2;
       const terrainHeight = sampleWorldField(fields, "elevation", midpointX, midpointZ);
-      const deckHeight = Math.max(terrainHeight, blueprint.terrain.waterLevel ?? terrainHeight) + .08;
+      const waterSurface = sampleWorldField(fields, "waterSurface", midpointX, midpointZ);
+      // Keep the complete deck above the animated surface, not merely its
+      // entity origin. This clearance also prevents bank and wave clipping.
+      const deckHeight = Math.max(terrainHeight + .28, waterSurface + .42);
       chunkEntities.push(entity(
         blueprint, chunkId, 1180 + index, blueprint.terrain.roadMaterial === "stone" ? "bridge-stone" : "bridge-wood", "Route-aligned water crossing",
         midpointX, deckHeight, midpointZ,
@@ -605,45 +531,52 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
       // with actual elevation, moisture, slope and hydraulic deposition. It
       // yields coherent forest/riparian/meadow regions instead of uniform dots.
       const ecologyDensity = (sampleX: number, sampleZ: number, layer: "canopy" | "understory" | "ground" = "canopy") => {
+        if(blueprint.site?.shared){const site=blueprint.site,wx=sampleX+site.x,wz=sampleZ+site.z,c=sampleSharedClimate(blueprint.seed,site.shared!,wx,wz,sampleWorldField(fields,'elevation',sampleX,sampleZ)+site.datum,sampleWorldField(fields,'streamMap',sampleX,sampleZ),sampleWorldField(fields,'slope',sampleX,sampleZ));return (layer==='canopy'?c.forest:layer==='understory'?c.forest*.6:Math.min(.95,c.moisture))*(1-c.snow)*(1-worldClearing(site.shared,wx,wz));}
         const moisture = sampleWorldField(fields, "moisture", sampleX, sampleZ);
         const slope = sampleWorldField(fields, "slope", sampleX, sampleZ);
         const sediment = sampleWorldField(fields, "sediment", sampleX, sampleZ);
         const flow = Math.log1p(sampleWorldField(fields, "accumulation", sampleX, sampleZ)) / Math.log1p(Math.max(1, hydrology.maximumAccumulation));
         const climatePatch = simplexNoise2D((sampleX - 811) * .026, (sampleZ + 503) * .026, blueprint.seed + 3371);
-        const forest = clamp((moisture - .32) * 1.45 + climatePatch * .78 + sediment * .28 - slope * 1.08, 0, 1);
+        const forest = clamp((chunkBiome.id === "forest" ? .38 : 0) + (moisture - .32) * 1.45 + climatePatch * .55 + sediment * .28 - slope * .8, 0, 1);
         const riparian = clamp(flow * .78 + moisture * .5 - slope * .7, 0, 1);
         const meadow = clamp(1.08 - forest * .72 - slope * 1.25 + climatePatch * .18, 0, 1);
         const mask = layer === "canopy" ? forest * .92 + riparian * .22 : layer === "understory" ? forest * .58 + riparian * .7 : meadow * .66 + forest * .34 + riparian * .42;
-        return clamp(blueprint.biome.vegetationDensity * mask * (layer === "canopy" ? WORLD_VISUAL_CONFIG.forest.densityMultiplier : 1.35), 0, .98);
+        return clamp(chunkBiome.vegetationDensity * mask * (layer === "canopy" ? WORLD_VISUAL_CONFIG.forest.densityMultiplier : 1.35), 0, .98);
       };
-      const isReserved = (sampleX: number, sampleZ: number, padding: number) => blueprint.zones.some((zone) => Math.hypot(sampleX - zone.center.x, sampleZ - zone.center.z) < zone.radius * .58 + padding);
-      const candidates = noiseWeightedPoissonPoints(x - 8, z - 8, 16, blueprint.biome.treeStyle === "none" ? 2.8 : WORLD_VISUAL_CONFIG.forest.minimumTreeRadius, blueprint.biome.treeStyle === "none" ? 5.2 : WORLD_VISUAL_CONFIG.forest.maximumTreeRadius, blueprint.seed + 333, (sampleX, sampleZ) => ecologyDensity(sampleX, sampleZ, "canopy"));
+      const isReserved = (sampleX: number, sampleZ: number, padding: number) => blueprint.site?.shared?worldClearing(blueprint.site.shared,sampleX+blueprint.site.x,sampleZ+blueprint.site.z)>.05:blueprint.zones.some((zone) => Math.hypot(sampleX - zone.center.x, sampleZ - zone.center.z) < zone.radius * .58 + padding);
+      const candidates = blueprint.site?.shared?worldForestCandidates(blueprint.seed,x-8+blueprint.site.x,z-8+blueprint.site.z,16).map(p=>({...p,x:p.x-blueprint.site!.x,z:p.z-blueprint.site!.z})).filter(p=>p.priority<ecologyDensity(p.x,p.z,'canopy')):noiseWeightedPoissonPoints(x - 8, z - 8, 16, chunkBiome.treeStyle === "none" ? 2.8 : WORLD_VISUAL_CONFIG.forest.minimumTreeRadius, chunkBiome.treeStyle === "none" ? 5.2 : WORLD_VISUAL_CONFIG.forest.maximumTreeRadius, blueprint.seed + 333, (sampleX, sampleZ) => ecologyDensity(sampleX, sampleZ, "canopy"));
       const canopyLocations: Array<{ x: number; z: number; y: number; radius: number; priority: number }> = [];
       for (const [index, point] of candidates.entries()) {
         const pointHeight = sampleTerrainHeight(geometry, point.x, point.z);
         const slope = sampleWorldField(fields, "slope", point.x, point.z), moisture = sampleWorldField(fields, "moisture", point.x, point.z);
         const onRoute = roads.some((road) => distanceToSegment(point.x, point.z, road.ax, road.az, road.bx, road.bz) < road.width + 1.2);
-        if (isReserved(point.x, point.z, 1.2) || onRoute || slope > Math.tan(Math.PI / 6) || (blueprint.terrain.waterLevel !== undefined && pointHeight < blueprint.terrain.waterLevel + .12)) continue;
-        const assetId = blueprint.biome.treeStyle === "none" ? "rock" : treeAsset(blueprint.biome, point.priority);
-        const ecologicalScale = (.68 + point.priority * .62) * (assetId === "tree-cypress" ? .88 + moisture * .24 : 1);
+        if (isReserved(point.x, point.z, 1.2) || onRoute || slope > Math.tan(Math.PI / 6) || sampleWorldField(fields, "poolDepth", point.x, point.z) > .06 || sampleWorldField(fields, "streamMap", point.x, point.z) > .16 || (blueprint.terrain.waterLevel !== undefined && pointHeight < blueprint.terrain.waterLevel + .12)) continue;
+        const assetId = chunkBiome.treeStyle === "none" ? "rock" : treeAsset(chunkBiome, point.priority);
+        const appearance = (channel: number) => scatterVariation(point.x, point.z, blueprint.seed, channel);
+        const ecologicalScale = (.72 + appearance(1) * .58) * (assetId === "tree-cypress" ? .88 + moisture * .24 : 1);
         canopyLocations.push({ x: point.x, z: point.z, y: pointHeight, radius: 2.25 * ecologicalScale, priority: point.priority });
-        const tree = entity(blueprint, chunkId, 10 + index, assetId, blueprint.biome.treeStyle === "none" ? "Regional stone" : `${blueprint.biome.treeStyle} space-colonized tree`, point.x, pointHeight, point.z, ecologicalScale, point.priority * 360, ["world:vegetation", "ecology:canopy", "generator:space-colonization", `instance-family:${assetId}`]);
-        if (blueprint.biome.treeStyle !== "none") {
+        const tree = entity(blueprint, chunkId, 10 + index, assetId, chunkBiome.treeStyle === "none" ? "Regional stone" : `${chunkBiome.treeStyle} space-colonized tree`, point.x, pointHeight, point.z, ecologicalScale, point.priority * 360, ["world:vegetation", "ecology:canopy", "generator:space-colonization", `instance-family:${assetId}`, `biome:${chunkBiome.id}`]);
+        if (chunkBiome.treeStyle !== "none") {
           // Six deterministic botanical variants are shared across the region;
           // transforms still vary per instance. This mirrors an HISM family and
           // avoids solving space colonization hundreds of times per compile.
-          const variant = Math.min(5, Math.floor(point.priority * 6));
-          const variantKey = `${blueprint.biome.treeStyle}:${variant}`;
+          const variant = Math.min(5, Math.floor(appearance(2) * 6));
+          const variantKey = `${chunkBiome.treeStyle}:${variant}`;
           let treeGeometry = treeGeometryVariants.get(variantKey);
           if (!treeGeometry) {
-            treeGeometry = generateSpaceColonizedTree(blueprint.seed + variant * 7919, blueprint.biome.treeStyle);
+            treeGeometry = generateSpaceColonizedTree(blueprint.seed + variant * 7919, chunkBiome.treeStyle);
             treeGeometryVariants.set(variantKey, treeGeometry);
           }
-          tree.worldGeometry = treeGeometry;
+          tree.worldGeometry = { ...treeGeometry, branches: [], leafClusters: [], prototypeSeed: blueprint.seed + variant * 7919 };
+          const batch = chunkEntities.find(entry => entry.worldGeometry?.kind === "space-colonized-tree" && entry.worldGeometry.prototypeSeed === blueprint.seed + variant * 7919);
+          const placement = { x: point.x, y: pointHeight, z: point.z, rotation: appearance(3) * 360, scale: ecologicalScale };
+          if (batch?.worldGeometry?.kind === "space-colonized-tree") { batch.worldGeometry.instances!.push(placement); continue; }
+          tree.worldGeometry.instances = [placement];
+          tree.position = { x, y: 0, z }; tree.rotation.y = 0; tree.scale = { x: 1, y: 1, z: 1 };
         }
         chunkEntities.push(tree);
       }
-      if (blueprint.biome.treeStyle !== "none") {
+      if (chunkBiome.treeStyle !== "none") {
         const understory = noiseWeightedPoissonPoints(x - 8, z - 8, 16, 1.35, 2.9, blueprint.seed + 733, (sampleX, sampleZ) => ecologyDensity(sampleX, sampleZ, "understory"));
         // Parent-child satellites make each canopy tree seed a believable
         // shade community. Independent Poisson points fill only the gaps.
@@ -655,10 +588,18 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
         for (const [index, point] of [...satellites, ...understory].entries()) {
           const pointHeight = sampleTerrainHeight(geometry, point.x, point.z), slope = sampleWorldField(fields, "slope", point.x, point.z), moisture = sampleWorldField(fields, "moisture", point.x, point.z);
           const onRoute = roads.some((road) => distanceToSegment(point.x, point.z, road.ax, road.az, road.bx, road.bz) < road.width + .7);
-          if (point.x < chunkMinX || point.x >= chunkMaxX || point.z < chunkMinZ || point.z >= chunkMaxZ || isReserved(point.x, point.z, .55) || onRoute || slope > .72 || (blueprint.terrain.waterLevel !== undefined && pointHeight < blueprint.terrain.waterLevel - .08)) continue;
-          const wetland = moisture > .68 && (blueprint.biome.id === "swamp" || blueprint.biome.id === "coast");
+          if (point.x < chunkMinX || point.x >= chunkMaxX || point.z < chunkMinZ || point.z >= chunkMaxZ || isReserved(point.x, point.z, .55) || onRoute || slope > .72 || sampleWorldField(fields, "poolDepth", point.x, point.z) > .045 || sampleWorldField(fields, "streamMap", point.x, point.z) > .14 || (blueprint.terrain.waterLevel !== undefined && pointHeight < blueprint.terrain.waterLevel - .08)) continue;
+          const wetland = moisture > .68 && (chunkBiome.id === "swamp" || chunkBiome.id === "coast");
           const assetId = wetland ? "reeds-wetland" : "shrub-broadleaf";
-          chunkEntities.push(entity(blueprint, chunkId, 80 + index, assetId, wetland ? "Wet bank reeds" : "Regional understory", point.x, pointHeight, point.z, .55 + point.priority * .45, point.priority * 360, ["world:vegetation", wetland ? "ecology:riparian" : "ecology:understory", `instance-family:${assetId}`]));
+          const plantSeed = blueprint.seed + 1709 + Math.floor(point.priority * 2) * 7919;
+          const prototype = wetland ? undefined : generateUnderstoryPrototype(plantSeed);
+          const batch = chunkEntities.find(entry => entry.tags?.includes(wetland ? "ecology:riparian-batch" : "ecology:understory-batch") && (wetland || (entry.worldGeometry?.kind === "space-colonized-tree" && entry.worldGeometry.prototypeSeed === plantSeed)));
+          const placement = { x: Number(point.x.toFixed(3)), y: Number(pointHeight.toFixed(3)), z: Number(point.z.toFixed(3)), scale: (.55 + point.priority * .45) * (wetland ? 2.8 : .22), rotation: point.priority * (wetland ? Math.PI * 2 : 360) };
+          if (batch?.worldGeometry?.kind === "space-colonized-tree") { batch.worldGeometry.instances!.push(placement); continue; }
+          if (batch?.worldGeometry?.kind === "ground-cover") { batch.worldGeometry.instances.push(placement); continue; }
+          const plants = entity(blueprint, chunkId, 80 + index, assetId, wetland ? "Wet bank reeds" : "Regional understory", x, 0, z, 1, 0, ["world:vegetation", wetland ? "ecology:riparian" : "ecology:understory", wetland ? "ecology:riparian-batch" : "ecology:understory-batch", `instance-family:${assetId}`]);
+          plants.worldGeometry = wetland ? { kind: "ground-cover", color: "#78874a", instances: [placement] } : { ...prototype!, prototypeSeed: plantSeed, branches: [], leafClusters: [], instances: [placement] };
+          chunkEntities.push(plants);
         }
         // GPU Gems-style grass is a dense field of multi-blade clusters, not a
         // scattering of individual decorative props. The ecological mask
@@ -673,20 +614,24 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
           (sampleX, sampleZ) => clamp(WORLD_VISUAL_CONFIG.grass.minimumMaskDensity + ecologyDensity(sampleX, sampleZ, "ground") * .28, 0, .995),
         ).filter((point) => {
           const pointHeight = sampleTerrainHeight(geometry, point.x, point.z);
+          const riverClearance = hydrology.riverSegments.some((river) => distanceToSegment(point.x, point.z, river.ax, river.az, river.bx, river.bz) < river.width * .62 + .62);
           return sampleWorldField(fields, "slope", point.x, point.z) < WORLD_VISUAL_CONFIG.grass.maximumSlope
             && !roads.some((road) => distanceToSegment(point.x, point.z, road.ax, road.az, road.bx, road.bz) < road.width + WORLD_VISUAL_CONFIG.grass.roadClearanceMeters)
+            && !riverClearance
+            && sampleWorldField(fields, "poolDepth", point.x, point.z) < .035
+            && sampleWorldField(fields, "streamMap", point.x, point.z) < .13
             && (blueprint.terrain.waterLevel === undefined || pointHeight >= blueprint.terrain.waterLevel + .03);
         });
         if (groundPoints.length) {
           const cover = entity(blueprint, chunkId, 140, "shrub-broadleaf", "GPU-instanced ecological ground cover", x, 0, z, 1, 0, ["world:vegetation", "ecology:ground-cover", "render:gpu-instanced"]);
-          cover.worldGeometry = { kind: "ground-cover", color: blueprint.biome.id === "snow" ? "#aab8aa" : blueprint.biome.id === "swamp" ? "#526f42" : "#6f9848", instances: groundPoints.map((point) => ({ x: point.x, y: sampleTerrainHeight(geometry, point.x, point.z) + .015, z: point.z, scale: WORLD_VISUAL_CONFIG.grass.minimumScale + point.priority * WORLD_VISUAL_CONFIG.grass.scaleVariation, rotation: point.priority * Math.PI * 2 })) };
+          cover.worldGeometry = { kind: "ground-cover", color: chunkBiome.id === "snow" ? "#8ea684" : chunkBiome.id === "swamp" ? "#45683c" : "#527d3e", instances: groundPoints.map((point) => ({ x: point.x, y: sampleTerrainHeight(geometry, point.x, point.z) - .035, z: point.z, scale: WORLD_VISUAL_CONFIG.grass.minimumScale + scatterVariation(point.x, point.z, blueprint.seed, 1) * WORLD_VISUAL_CONFIG.grass.scaleVariation, rotation: scatterVariation(point.x, point.z, blueprint.seed, 2) * Math.PI * 2 })) };
           chunkEntities.push(cover);
         }
       }
     }
 
     const settlementZone = blueprint.zones.find((zone) => zone.purpose === "settlement" && Math.hypot(x - zone.center.x, z - zone.center.z) < zone.radius + 12);
-    if (blueprint.kind === "settlement" && settlementZone && pathDistance < WORLD_CHUNK_SIZE * 1.2 && ((cx + cz) % 2 === 0)) {
+    if (blueprint.kind === "settlement" && settlementZone && roads.length && pathDistance < WORLD_CHUNK_SIZE * 1.2 && ((cx + cz) % 2 === 0 || (blueprint.architecture?.density ?? 0) > .8)) {
       const side = ((cx + cz) % 4 < 2 ? 1 : -1);
       const road = roads.reduce((nearest, candidate) => distanceToSegment(x, z, candidate.ax, candidate.az, candidate.bx, candidate.bz) < distanceToSegment(x, z, nearest.ax, nearest.az, nearest.bx, nearest.bz) ? candidate : nearest, roads[0]);
       const roadDx = road.bx - road.ax, roadDz = road.bz - road.az, roadLengthSquared = roadDx * roadDx + roadDz * roadDz;
@@ -698,8 +643,17 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
       const roadHeading = Math.atan2(roadDx, roadDz) * 180 / Math.PI;
       const prominent = (cx + cz) % 4 === 0;
       const building = entity(blueprint, chunkId, 20, prominent ? "house-large" : "house-small", "CGA regional building", bx, buildingHeight, bz, 1, roadHeading + (side > 0 ? 180 : 0), ["world:building", "layout:road-parcel", "generator:cga-shape-grammar", "grammar:footprint-extrusion-floor-split-facade-instances", "facade:constrained-modules"]);
-      building.worldGeometry = generateCgaBuilding(blueprint.seed + cx * 7919 + cz * 104729, prominent, blueprint.terrain.roadMaterial === "stone" ? "stone" : "timber");
-      chunkEntities.push(building);
+      building.worldGeometry = generateCgaBuilding(blueprint.seed + cx * 7919 + cz * 104729, prominent, blueprint.architecture?.material ?? (blueprint.terrain.roadMaterial === "stone" ? "stone" : "timber"), blueprint.architecture?.ruin ?? 0);
+      building.name = `${building.worldGeometry.roof === "ruined" ? "Ruined" : prominent ? "Village hall" : "Cottage"} ${cx + cz * countX + 1}`;
+      const recipe = blueprint.composition?.recipes.find((entry) => entry.id === blueprint.composition?.buildingRecipeId);
+      if (recipe) {
+        building.name = recipe.name;
+        building.worldGeometry = { kind: "assembly", recipeId: recipe.id, parts: expandSceneRecipe(recipe.parts) };
+        const bounds = sceneRecipeBounds(recipe.parts), scale = Math.min(1, 10 / Math.max(bounds.max.x - bounds.min.x, bounds.max.z - bounds.min.z));
+        building.scale = { x: scale, y: scale, z: scale };
+        building.position.y -= bounds.min.y * scale;
+      }
+      if (!blueprint.composition || recipe) chunkEntities.push(building);
     }
     if (flat) {
       const chunkRooms = rooms.filter((room) => room.x + room.width / 2 >= x - 8 && room.x + room.width / 2 < x + 8 && room.z + room.depth / 2 >= z - 8 && room.z + room.depth / 2 < z + 8);
@@ -754,6 +708,61 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
     }
   }
 
+  // Resolve parcel ownership globally, then dress each building and clear its
+  // footprint. A tree generated in a neighboring chunk must also respect it.
+  for (const [index, placement] of (blueprint.composition?.placements ?? []).entries()) {
+    const recipe = blueprint.composition!.recipes.find((entry) => entry.id === placement.recipeId);
+    const owner = chunks.find((chunk) => placement.x >= chunk.bounds.min.x && placement.x < chunk.bounds.max.x && placement.z >= chunk.bounds.min.z && placement.z < chunk.bounds.max.z);
+    if (!recipe || !owner) continue;
+    const assembly = entity(blueprint, owner.id, 4000 + index, "house-large", recipe.name, placement.x, sampleWorldField(fields, "elevation", placement.x, placement.z) + placement.elevation, placement.z, placement.scale, placement.yaw, ["world:building", "world:ai-composition"]);
+    assembly.worldGeometry = { kind: "assembly", recipeId: recipe.id, parts: expandSceneRecipe(recipe.parts) };
+    assembly.position.y -= sceneRecipeBounds(recipe.parts).min.y * placement.scale;
+    entities.push(assembly);
+  }
+  const placementSurface = fieldPlacementSurface(fields, roads);
+  const placementWarnings: string[] = [];
+  const acceptedBuildings: MapEntity[] = [];
+  if (blueprint.kind !== "interior" && blueprint.kind !== "dungeon") for (const building of entities.filter(e => e.worldGeometry?.kind === "assembly" || e.worldGeometry?.kind === "cga-building")) {
+    if (placeOnDryGround(building, placementSurface, acceptedBuildings)) acceptedBuildings.push(building);
+    else { placementWarnings.push(`No dry supported parcel for ${building.name}`); entities.splice(entities.indexOf(building), 1); }
+  }
+  const dryPlant = (x:number,z:number,radius:number) => [[0,0],[radius,0],[-radius,0],[0,radius],[0,-radius]].every(([dx,dz]) => !placementSurface.blocked(x+dx,z+dz));
+  const buildings = entities.filter((entry) => entry.worldGeometry?.kind === "cga-building" || entry.worldGeometry?.kind === "assembly");
+  const assemblyBounds = new Map(buildings.filter((building) => building.worldGeometry?.kind === "assembly").map((building) => [building.id, sceneRecipeBounds((building.worldGeometry as import("./types").WorldAssemblyGeometry).parts)]));
+  const insideBuilding = (x: number, z: number, padding = 0) => buildings.some((building) => {
+    if (building.worldGeometry?.kind !== "cga-building" && building.worldGeometry?.kind !== "assembly") return false;
+    const angle = building.rotation.y * Math.PI / 180, dx = x - building.position.x, dz = z - building.position.z;
+    const lx = (dx * Math.cos(angle) - dz * Math.sin(angle)) / building.scale.x, lz = (dx * Math.sin(angle) + dz * Math.cos(angle)) / building.scale.z;
+    const bounds = assemblyBounds.get(building.id);
+    const points = building.worldGeometry.kind === "cga-building" ? building.worldGeometry.footprint : [bounds!.min, bounds!.max];
+    return lx > Math.min(...points.map((p) => p.x)) - padding / building.scale.x && lx < Math.max(...points.map((p) => p.x)) + padding / building.scale.x && lz > Math.min(...points.map((p) => p.z)) - padding / building.scale.z && lz < Math.max(...points.map((p) => p.z)) + padding / building.scale.z;
+  });
+  for (let index = entities.length - 1; index >= 0; index--) {
+    const item = entities[index];
+    if (item.worldGeometry?.kind === "space-colonized-tree" && item.worldGeometry.instances) { item.worldGeometry.instances = item.worldGeometry.instances.filter(p => !insideBuilding(p.x, p.z, 2) && dryPlant(p.x, p.z, .65)); if (!item.worldGeometry.instances.length) entities.splice(index, 1); }
+    else if (item.worldGeometry?.kind === "ground-cover") item.worldGeometry.instances = item.worldGeometry.instances.filter((p) => !insideBuilding(p.x, p.z, .6) && dryPlant(p.x, p.z, .3));
+    else if ((item.tags?.includes("world:vegetation") || item.tags?.includes("ecology:understory")) && (insideBuilding(item.position.x, item.position.z, 2) || !dryPlant(item.position.x, item.position.z, .65))) entities.splice(index, 1);
+  }
+  for (const [buildingIndex, building] of buildings.entries()) {
+    if (blueprint.composition) continue; // The director owns dressing for custom compositions.
+    const ruined = building.worldGeometry?.kind === "cga-building" && building.worldGeometry.roof === "ruined";
+    for (let index = 0; index < (ruined ? 9 : 4); index++) {
+      const angle = lattice(buildingIndex, index, blueprint.seed + 73) * Math.PI * 2;
+      const radius = 4.8 + lattice(index, buildingIndex, blueprint.seed + 91) * 2.3;
+      const px = building.position.x + Math.cos(angle) * radius, pz = building.position.z + Math.sin(angle) * radius;
+      if (Math.abs(px) > halfWidth - 1 || Math.abs(pz) > halfDepth - 1 || insideBuilding(px, pz, .3) || roads.some((r) => distanceToSegment(px, pz, r.ax, r.az, r.bx, r.bz) < r.width + .5)) continue;
+      if (!dryPlant(px, pz, 1)) continue;
+      const prop = entity(blueprint, building.chunkId!, 2000 + buildingIndex * 16 + index, ruined ? (index % 3 ? "rock" : "crate") : ["barrel", "crate", "fence-wood", "market-stall"][index], ruined ? "Scattered ruin debris" : "Village courtyard prop", px, sampleWorldField(fields, "elevation", px, pz), pz, ruined ? { x: .45 + index * .07, y: .3, z: .5 } : .8, angle * 180 / Math.PI, ["world:dressing"]);
+      entities.push(prop);
+    }
+  }
+  for (const chunk of chunks) chunk.entityIds = [];
+  for (const item of entities) {
+    const owner = chunks.find((chunk) => item.position.x >= chunk.bounds.min.x && item.position.x < chunk.bounds.max.x && item.position.z >= chunk.bounds.min.z && item.position.z < chunk.bounds.max.z);
+    const chunk = owner ?? chunks.find((chunk) => chunk.id === item.chunkId);
+    if (chunk) { item.chunkId = chunk.id; chunk.entityIds.push(item.id); }
+  }
+
   const landmarkZone = blueprint.zones.find((zone) => zone.purpose === "landmark") ?? blueprint.zones[Math.min(2, blueprint.zones.length - 1)];
   blueprint.assetRequests.forEach((request, index) => {
     const materialRequest = /material|surface|texture|ground|wall finish/i.test(`${request.name} ${request.description}`);
@@ -762,10 +771,15 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
       return;
     }
     if (!landmarkZone || index >= 4) return;
+    if (blueprint.composition) return;
     const owner = chunks.find((chunk) => landmarkZone.center.x >= chunk.bounds.min.x && landmarkZone.center.x < chunk.bounds.max.x && landmarkZone.center.z >= chunk.bounds.min.z && landmarkZone.center.z < chunk.bounds.max.z);
     if (!owner) return;
-    const placeholder = entity(blueprint, owner.id, 300 + index, "rock", `${request.name} placeholder`, landmarkZone.center.x + index * 2.2, landmarkZone.center.y, landmarkZone.center.z, 1.2, index * 37, ["world:asset-placeholder", `asset-request:${request.id}`]);
-    entities.push(placeholder); owner.entityIds.push(placeholder.id);
+    const placeholder = entity(blueprint, owner.id, 300 + index, "house-large", request.name, landmarkZone.center.x + index * 2.2, landmarkZone.center.y, landmarkZone.center.z, 1, index * 37, ["world:asset-placeholder", "world:landmark", `asset-request:${request.id}`]);
+    placeholder.worldGeometry = generateCgaBuilding(blueprint.seed + 301 + index, true, "stone", blueprint.architecture?.ruin ?? (blueprint.theme === "ruins" ? .8 : 0));
+    if (blueprint.kind !== "interior" && blueprint.kind !== "dungeon" && !placeOnDryGround(placeholder, placementSurface, [...buildings, ...entities.filter(e => e.tags?.includes("world:asset-placeholder"))])) { placementWarnings.push(`No dry supported parcel for ${placeholder.name}`); return; }
+    entities.push(placeholder);
+    const placedOwner = chunks.find(c => placeholder.position.x >= c.bounds.min.x && placeholder.position.x < c.bounds.max.x && placeholder.position.z >= c.bounds.min.z && placeholder.position.z < c.bounds.max.z) ?? owner;
+    placeholder.chunkId = placedOwner.id; placedOwner.entityIds.push(placeholder.id);
   });
 
   const lightColor = blueprint.mood === "moonlight" ? "#a9c8ff" : blueprint.mood === "crypt" ? "#8fd4bd" : blueprint.mood === "desert" ? "#ffd09a" : "#ffd7a0";
@@ -781,8 +795,10 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
   });
 
   const validation = { ...validateCompiledWorld(blueprint, chunks, entities), repairPasses: repaired.passes };
+  validation.warnings.push(...placementWarnings);
   const now = new Date().toISOString();
   const map: GameMap = {
+    weather: blueprint.weather ?? weatherFromDescription(blueprint.description),
     id: stableId("world-map", blueprint.seed), name: blueprint.name, theme: blueprint.theme, width: blueprint.width, depth: blueprint.depth,
     gridSize: 1, gridShape: blueprint.gridShape, ambientColor: blueprint.biome.palette.ground, entities,
     lighting: {
@@ -796,9 +812,10 @@ export function compileWorldBlueprint(input: WorldBlueprintV1): CompiledWorld {
       fogMist: false,
     },
     world: {
+      site:blueprint.site,
       version: 1, generatorRevision: WORLD_GENERATOR_REVISION, blueprintId: blueprint.id, seed: blueprint.seed, chunkSize: WORLD_CHUNK_SIZE, chunks,
       hydrology: { resolution: hydrology.resolution, cellSize: hydrology.cellSize, riverSegments: hydrology.riverSegments.length, maximumAccumulation: hydrology.maximumAccumulation, sinkFilled: true, filledCellCount: hydrology.filledCellCount, maximumFillDepth: hydrology.maximumFillDepth },
-      fieldSet: { resolution: fields.resolution, cellSize: fields.cellSize, layers: ["elevation", "filledElevation", "flowDirection", "accumulation", "slope", "curvature", "moisture", "sediment"], erosionPasses: 5 + Math.round(blueprint.terrain.erosion * 7), authority: "global-region" },
+      fieldSet: { resolution: fields.resolution, cellSize: fields.cellSize, layers: ["elevation", "waterMask", "waterSurface", "waterDepth", "filledElevation", "poolDepth", "streamMap", "momentumX", "momentumZ", "soilDepth", "screeDepth", "bedrockExposure", "saturation", "flowDirection", "accumulation", "slope", "curvature", "moisture", "sediment", "aeolianSediment", "windPath", "abrasion"], erosionPasses: 5 + Math.round(blueprint.terrain.erosion * 7), authority: "global-region" },
       generatedAt: now,
     },
     generation: { blueprint, provider: "procedural", quality: blueprint.presentation.background === "splat" ? "showpiece" : "complete", revision: 1, generatedAt: now },
@@ -838,7 +855,7 @@ export function createSceneTemplate(map: GameMap, description = map.generation?.
     id: existing?.id ?? stableId("scene-template", hashString(map.id)), name: map.name, description, map: structuredClone(map),
     thumbnailStorageKey: existing?.thumbnailStorageKey,
     propAssetIds: [...new Set(map.entities.map((entry) => entry.assetId).filter((id) => !id.startsWith("floor-") && !id.startsWith("wall-") && !id.startsWith("tree-") && !id.startsWith("token-") && !["chair", "table-round", "table-long", "barrel", "crate", "chest", "torch", "pillar", "door-wood", "rock"].includes(id)))],
-    materialAssetIds: [...new Set(map.entities.flatMap((entry) => entry.materialAssetId ? [entry.materialAssetId] : []))],
+    materialAssetIds: [...new Set(map.entities.flatMap((entry) => [...(entry.materialAssetId ? [entry.materialAssetId] : []), ...Object.values(entry.materialSlots ?? {}).filter((id): id is string => Boolean(id))]))],
     revisions: [revision, ...(existing?.revisions ?? [])].slice(0, MAX_SCENE_TEMPLATE_REVISIONS), createdAt: existing?.createdAt ?? now, updatedAt: now,
   };
 }

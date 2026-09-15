@@ -9,6 +9,7 @@ export interface GenerationProgressView {
   stageLabel: string;
   detail?: string;
   reportedByEngine?: boolean;
+  indeterminate?: boolean;
 }
 
 interface GenerationProgressProps {
@@ -42,22 +43,22 @@ export function GenerationProgress({ value, label = "Generation progress", onCan
       <header>
         <span className="generation-progress-icon"><Icon className={value.status === "running" ? "spin" : ""} size={16} /></span>
         <span><small>{value.stageLabel}</small><strong>{value.message}</strong></span>
-        <output>{percent}%</output>
+        <output>{value.status === 'error' ? 'Stopped' : value.indeterminate&&value.status==='running'?'Working':`${percent}%`}</output>
       </header>
       <div
-        className="generation-progress-track"
+        className={`generation-progress-track${value.indeterminate&&value.status==='running'?' indeterminate':''}`}
         role="progressbar"
         aria-label={label}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={percent}
-        aria-valuetext={`${percent}% · ${value.message}`}
+        aria-valuenow={value.indeterminate?undefined:percent}
+        aria-valuetext={value.indeterminate && value.status === "running" ? value.message : `${percent}% ? ${value.message}`}
       >
         <i style={{ width: `${percent}%` }}><b /></i>
       </div>
       <footer>
         <span><Clock3 size={11} /> Elapsed {elapsed}</span>
-        <span>{value.detail ?? (value.reportedByEngine ? "Live progress from the local engine" : value.status === "running" ? "Still working locally — you can leave DnDRom open" : "Ready to review")}</span>
+        <span>{value.status === 'error' ? (value.detail ?? 'Generation stopped. Review the message above.') : value.detail ?? (value.reportedByEngine ? "Live progress from the local engine" : value.status === "running" ? "Still working locally — you can leave DnDRom open" : "Ready to review")}</span>
         {(value.status === "running" || value.status === "queued") && onCancel && <button type="button" onClick={onCancel}><OctagonX size={12} /> {value.status === "queued" ? "Remove" : "Cancel"}</button>}
       </footer>
     </section>

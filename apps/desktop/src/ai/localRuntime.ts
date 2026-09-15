@@ -1,8 +1,8 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, isTauri } from "../platform/desktop";
+import { listen } from "../platform/desktop";
 import { readLocalAiSettings, worldWanBudget } from "../domain/localAiSettings";
 
-export type LocalRuntimeFeature = "characterPixal3d" | "characterTrellis2" | "characterRig" | "propImageLite" | "propImageKrea" | "world";
+export type LocalRuntimeFeature = "languageModel" | "speech" | "characterPixal3d" | "characterTrellis2" | "characterRig" | "propImageLite" | "propImageKrea" | "world";
 
 export interface LocalRuntimeStatus {
   state: "ready" | "external" | "needsStart" | "needsInstall";

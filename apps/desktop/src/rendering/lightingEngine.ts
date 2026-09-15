@@ -1,8 +1,10 @@
+import { installWorldAtmosphere } from "./worldAtmosphere";
 import * as pc from "playcanvas";
 import { ASSET_BY_ID } from "../domain/assets";
 import { getDisplaySettings, type DisplaySettings } from "../domain/displaySettings";
 import { hemisphereAmbientCoefficients, LIGHTING_QUALITY_BUDGETS, prioritizeVisibleLights, resolveSceneLighting, tabletopLightingProfile } from "../domain/lighting";
 import { resolvePracticalLight } from "../domain/practicalLights";
+import { isInteriorMap } from "../domain/mapClassification";
 import type { GameMap, LightingQuality, SceneLightingSettings } from "../domain/types";
 import { bakeLightProbeGrid, sampleLightProbe, type LightProbeGrid, type ProbeBounceSource } from "./lightProbeGrid";
 
@@ -20,6 +22,7 @@ export interface LightingRig {
   dynamicLightFlicker: { amount: number; speed: number }[];
   dynamicLightSelectionOrigin: pc.Vec3 | null;
   cameraFrame: pc.CameraFrame | null;
+  cameraFrameRequested: boolean;
   lut: pc.Texture | null;
   lutMood: string | null;
   environment: { source?: pc.Texture; skybox?: pc.Texture; lightingSource?: pc.Texture; atlas?: pc.Texture; asset?: pc.Asset; objectUrl?: string };
@@ -107,11 +110,13 @@ const makeGradientEnvironment = (app: pc.Application, map: GameMap): pc.Texture 
   canvas.height = 128;
   const context = canvas.getContext("2d")!;
   const palettes = {
-    natural: ["#263849", "#6d7b81", "#11171c"],
+    natural: ["#3674ab", "#c1d5df", "#354936"],
     warm: ["#4a2418", "#93603d", "#160d09"],
     moonlight: ["#0b1432", "#405681", "#050813"],
     crypt: ["#0b211e", "#385a49", "#050d0c"],
-    desert: ["#63321f", "#a96f42", "#26150f"],
+    // A pale blue zenith and dusty warm horizon retain sand color separation;
+    // the old red-brown environment multiplied the entire region orange.
+    desert: ["#587888", "#c7a67a", "#4b3a2d"],
   } as const;
   const palette = palettes[settings.mood];
   const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
@@ -149,7 +154,7 @@ const createMoodLut = (app: pc.Application, map: GameMap): pc.Texture => {
     warm: { lift: [1.08, .97, .83], contrast: 1.07 },
     moonlight: { lift: [.78, .9, 1.13], contrast: 1.11 },
     crypt: { lift: [.75, 1.04, .82], contrast: 1.14 },
-    desert: { lift: [1.12, .98, .74], contrast: 1.09 },
+    desert: { lift: [1.035, 1.0, .94], contrast: 1.045 },
   } as const;
   const transform = transforms[mood];
   const encode = (value: number, channel: number) => pc.math.clamp(((value - .5) * transform.contrast + .5) * transform.lift[channel], 0, 1);
@@ -225,20 +230,21 @@ export const createLightingRig = (app: pc.Application, camera: pc.Entity): Light
   const rim = new pc.Entity("Camera rim light");
   rim.addComponent("light", { type: "directional", castShadows: false });
   app.root.addChild(rim);
+  installWorldAtmosphere(app.graphicsDevice);
   let cameraFrame: pc.CameraFrame | null = null;
   try {
     if (camera.camera) cameraFrame = new pc.CameraFrame(app, camera.camera);
   } catch {
     cameraFrame = null;
   }
-  return { destroyed: false, app, camera, key, fill, rim, hemisphereAmbient: new Float32Array(27), probeGrid: null, dynamicLights: [], dynamicLightBaseIntensity: [], dynamicLightFlicker: [], dynamicLightSelectionOrigin: null, cameraFrame, lut: null, lutMood: null, environment: {} };
+  return { destroyed: false, app, camera, key, fill, rim, hemisphereAmbient: new Float32Array(27), probeGrid: null, dynamicLights: [], dynamicLightBaseIntensity: [], dynamicLightFlicker: [], dynamicLightSelectionOrigin: null, cameraFrame, cameraFrameRequested: true, lut: null, lutMood: null, environment: {} };
 };
 
-/** Keeps authored PBR/reflection maps while replacing flat diffuse ambient with a two-color hemisphere. */
+/** Keeps authored PBR/reflection maps while using a compact diffuse
+ * sky/ground probe. This also prevents texture-heavy terrain from consuming
+ * the environment-atlas sampler in its already bounded WebGPU material. */
 export const applyLightweightAmbientToMaterial = (rig: LightingRig, material: pc.StandardMaterial): void => {
   if (rig.destroyed) return;
-  // LitMaterial supports per-material SH at runtime; the generated
-  // StandardMaterial declaration currently omits the inherited field.
   (material as pc.StandardMaterial & { ambientSH: Float32Array }).ambientSH = rig.hemisphereAmbient;
   material.update();
 };
@@ -308,7 +314,9 @@ export const applyLightingRig = (rig: LightingRig, map: GameMap, display = getDi
   if (rig.destroyed) return;
   const settings = effectiveLightingSettings(map, display);
   const isDiorama = settings.quality === "diorama";
-  const profile = tabletopLightingProfile(map.theme, map.width, map.depth, settings, Boolean(map.world));
+  const generatedInterior = isInteriorMap(map);
+  rig.cameraFrameRequested = !generatedInterior;
+  const profile = tabletopLightingProfile(map.theme, map.width, map.depth, settings, Boolean(map.world) && !generatedInterior);
   const budget = LIGHTING_QUALITY_BUDGETS[settings.quality];
   const clusterCells = configureClusteredLighting(rig, settings.quality);
   const maximumPixelRatio = settings.quality === "performance" ? 1 : settings.quality === "balanced" ? 1.5 : 2;
@@ -325,8 +333,8 @@ export const applyLightingRig = (rig: LightingRig, map: GameMap, display = getDi
   // or replacing authored material maps. This remains visible even on WebViews
   // where an individual CameraFrame post effect is unavailable.
   const postExposure = settings.quality === "performance" ? 1.16 : settings.quality === "balanced" ? 1.24 : settings.quality === "cinematic" ? 1.34 : 1.42;
-  const resolvedExposure = map.world ? 1.08 : postExposure;
-  rig.app.scene.exposure = Math.max(settings.exposure * resolvedExposure, map.world ? 1.08 : 0);
+  const resolvedExposure = map.world && !generatedInterior ? 1 : postExposure;
+  rig.app.scene.exposure = Math.max(settings.exposure * resolvedExposure, map.world && !generatedInterior ? 1 : generatedInterior ? 1.18 : 0);
   if (rig.camera.camera) rig.camera.camera.clearColor = new pc.Color(...profile.clearColor);
   rig.key.setEulerAngles(profile.sunElevation, profile.sunAzimuth, 0);
   if (rig.key.light) {
@@ -374,14 +382,15 @@ export const applyLightingRig = (rig: LightingRig, map: GameMap, display = getDi
     frame.rendering.renderTargetScale = pc.math.clamp(budget.renderScale, .5, 1);
     frame.rendering.toneMapping = pc.TONEMAP_ACES2;
     frame.rendering.samples = sampleCount;
+    frame.rendering.sceneDepthMap = true;
     frame.rendering.sharpness = settings.quality === "performance" ? .2 : settings.quality === "diorama" ? .32 : settings.quality === "cinematic" ? .28 : .22;
     frame.taa.enabled = antialiasing === "taa";
     frame.taa.jitter = settings.quality === "diorama" ? .7 : settings.quality === "cinematic" ? .62 : .42;
     frame.ssao.type = settings.ssao && budget.ssaoSamples ? pc.SSAOTYPE_LIGHTING : pc.SSAOTYPE_NONE;
     frame.ssao.samples = Math.max(1, budget.ssaoSamples);
-    frame.ssao.intensity = settings.quality === "diorama" ? .9 : settings.quality === "cinematic" ? .7 : .62;
-    frame.ssao.radius = settings.quality === "diorama" ? 4.2 : settings.quality === "cinematic" ? 4.8 : 3.8;
-    frame.ssao.power = settings.quality === "diorama" ? 3.65 : 3.2;
+    frame.ssao.intensity = generatedInterior ? .48 : settings.quality === "diorama" ? .9 : settings.quality === "cinematic" ? .7 : .62;
+    frame.ssao.radius = generatedInterior ? 2.1 : settings.quality === "diorama" ? 4.2 : settings.quality === "cinematic" ? 4.8 : 3.8;
+    frame.ssao.power = generatedInterior ? 2.15 : settings.quality === "diorama" ? 3.65 : 3.2;
     frame.ssao.minAngle = 8;
     frame.ssao.scale = .5;
     frame.ssao.blurEnabled = true;
@@ -409,7 +418,7 @@ export const applyLightingRig = (rig: LightingRig, map: GameMap, display = getDi
     frame.vignette.intensity = settings.quality === "diorama" ? .22 : .14;
     frame.vignette.inner = settings.quality === "diorama" ? .48 : .55;
     frame.vignette.outer = 1.2;
-    frame.dof.enabled = settings.depthOfField && settings.quality !== "performance";
+    frame.dof.enabled = settings.depthOfField && settings.quality !== "performance" && (!map.world || generatedInterior);
     frame.dof.nearBlur = settings.quality === "diorama";
     frame.dof.focusDistance = Math.max(2, rig.camera.getPosition().length());
     frame.dof.focusRange = settings.quality === "diorama"
@@ -434,16 +443,17 @@ export const applyLightingRig = (rig: LightingRig, map: GameMap, display = getDi
     frame.volumetricFog.maxDistance = Math.max(map.width, map.depth) * 1.8;
     frame.volumetricFog.steps = settings.quality === "diorama" ? 24 : 16;
     frame.volumetricFog.scale = settings.quality === "diorama" ? .67 : .5;
-    frame.updateOptions();
-    frame.enabled = true;
-    // CameraFrame is deliberately explicit: property changes are inert until
-    // update() rebuilds and configures its render-pass graph.
-    frame.update();
+    frame.enabled = rig.cameraFrameRequested;
+    // Do not rebuild CameraFrame from a React effect: map changes can land
+    // while WebGPU is recording SceneColor, which destroys the active encoder.
+    // `updateLightingRig` applies these options from PlayCanvas's update phase,
+    // before any render pass is opened.
   }
   const canvas = rig.app.graphicsDevice.canvas as HTMLCanvasElement;
   const resolvedShadowQuality = display.shadowQuality === "auto" ? (settings.quality === "diorama" ? "ultra" : settings.quality === "performance" ? "low" : "high") : display.shadowQuality;
   const resolvedAntialiasing = display.antialiasing === "auto" ? (settings.quality === "performance" ? "msaa" : "taa") : display.antialiasing;
   canvas.dataset.lightingQuality = settings.quality;
+  canvas.dataset.cameraFramePolicy = generatedInterior ? "disabled-interior" : "enabled-exterior";
   canvas.dataset.displayQuality = display.quality;
   canvas.dataset.shadowFiltering = resolvedShadowQuality === "high" || resolvedShadowQuality === "ultra" ? "pcf5" : resolvedShadowQuality === "off" ? "off" : "pcf3";
   canvas.dataset.shadowResolution = resolvedShadowQuality === "ultra" ? "4096" : resolvedShadowQuality === "high" ? "2048" : resolvedShadowQuality === "off" ? "0" : "1024";
@@ -462,6 +472,7 @@ export const applyLightingRig = (rig: LightingRig, map: GameMap, display = getDi
     : "off";
   canvas.dataset.cleanShadowPolicy = "one-directional-caster-high-resolution-biased-cascades";
   canvas.dataset.ambientModel = "sky-ground-spherical-harmonics";
+  canvas.dataset.ambientSource = "bounded-sh-probe+environment-specular";
   canvas.dataset.skyAmbient = profile.skyAmbient.join(",");
   canvas.dataset.worldSun = map.world ? "directional-readability-floor" : "tabletop-key";
   canvas.dataset.worldSunIntensity = profile.sunIntensity.toFixed(3);
@@ -595,6 +606,7 @@ export const refreshVirtualizedDynamicLights = (rig: LightingRig, map: GameMap, 
 
 export const updateLightingRig = (rig: LightingRig, timeSeconds: number, focusTargets: DepthOfFieldTarget[] = [], broadScene = false): void => {
   if (rig.destroyed) return;
+  if (rig.cameraFrame && rig.cameraFrame.enabled !== rig.cameraFrameRequested) rig.cameraFrame.enabled = rig.cameraFrameRequested;
   // Applies per-frame CameraFrame values (TAA jitter, DoF focus/blur, SSAO,
   // grading, bloom, fog and compose settings). Without this call the public
   // settings change while the rendered pass graph remains at its defaults.
@@ -613,7 +625,7 @@ export const updateLightingRig = (rig: LightingRig, timeSeconds: number, focusTa
     canvas.dataset.depthOfFieldBlurRadius = rig.cameraFrame.dof.blurRadius.toFixed(2);
     canvas.dataset.depthOfFieldNearBlur = String(rig.cameraFrame.dof.nearBlur);
   }
-  rig.cameraFrame?.update();
+  if (rig.cameraFrame?.enabled) rig.cameraFrame.update();
   rig.dynamicLights.forEach((light, index) => {
     if (!light.light) return;
     const flicker = rig.dynamicLightFlicker[index];

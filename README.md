@@ -1,8 +1,19 @@
 # DnDRom
 
-DnDRom is a downloadable, local-first 3D tabletop with an AI Dungeon Master. The repository now contains a playable Windows desktop vertical slice—not just the original plan.
+DnDRom is a downloadable, local-first 3D tabletop with an AI Dungeon Master. The repository now contains a playable Windows desktop vertical sliceâ€”not just the original plan.
 
 ## What works today
+
+**Unreal Windows build:** `apps/unreal` embeds the campaign/authoring interface,
+renders scenes natively, and owns local AI through the shared Rust runtime.
+`pnpm unreal package` followed by `pnpm unreal:installer` produces
+`artifacts/installers/DnDRom-Unreal-0.3.13-x64-setup.exe`. Native local scene
+generation, campaign persistence, catalogue switching, panel resizing and
+packaged startup have been exercised. Some advanced renderer/gameplay features
+still require migration; the capability list below includes legacy functionality.
+See [migration status, build commands and remaining work](docs/UNREAL_MIGRATION.md) and [0.3.12 native editing, render caches, and validation limits](docs/EDITING_AND_CACHE_0312.md).
+
+- Direct editable scenes with a local model through construction recipes, procedural frames, curved roofs, terrain and vegetation. Scene speak mode streams audio chunks to local Whisper and starts generation after a pause. Scene-wide surface styling and requested props use local ComfyUI; see [local scene generation and speech setup](docs/LOCAL_SCENE_GENERATION.md) for model requirements and current quality limits.
 
 - Build and edit lit 3D encounter maps in PlayCanvas with grid placement, selection, transforms, duplication, visibility, and notes. Relationship-aware generation turns chairs toward their tables, practical lights toward the room, and perimeter walls and posts consistently inward.
 - Use 43 ready-to-place assets: lightweight procedural pieces for settlements and landscapes plus bundled [Kenney Mini Dungeon](https://kenney.nl/assets/mini-dungeon) CC0 models. The complete included GLB pack is under 1 MB.
@@ -17,7 +28,7 @@ DnDRom is a downloadable, local-first 3D tabletop with an AI Dungeon Master. The
 - Run SRD 5.2.1 mechanics for D20 tests, attacks, cover, damage types, resistance/vulnerability/immunity, conditions, concentration, movement, rests, exhaustion, and death saves. See the explicit [rules coverage matrix](docs/RULES_ENGINE.md).
 - Stream local-model response tokens and begin queued sentence-level speech before the full response is complete. Narration can be interrupted.
 - Speak actions where the system webview exposes speech recognition, or type them; stage up to 12 mixed dice in an additive tray, press Roll once, and watch Rapier rigid bodies enter from the right with randomized launch velocity, angular impulse, material density, friction, and restitution. Convex dice collide with the board, tray boundaries, and each other; the completed simulation determines the upward local face before visible playback labels it with the authoritative result, so numbers never swap. Recessed normal-mapped numerals, temporal-AA motion suppression, a centered tabletop toast, and conventional paired d10 percentile rolls keep the result readable and physical.
-- Open Dice Forge to create reusable, per-die themes with a live rotating d4–d100 preview, independent body/number styling, and imported albedo, OpenGL normal, roughness, metallic, and AO maps. A downloadable 2048×1024 spherical template and prompt guide support hand painting or any opt-in cloud art tool; the same private local image runtime can generate an albedo and derive editable starter PBR maps automatically.
+- Open Dice Forge to create reusable, per-die themes with a live rotating d4â€“d100 preview, independent body/number styling, and imported albedo, OpenGL normal, roughness, metallic, and AO maps. A downloadable 2048Ã—1024 spherical template and prompt guide support hand painting or any opt-in cloud art tool; the same private local image runtime can generate an albedo and derive editable starter PBR maps automatically.
 - Create characters through a six-step in-app SRD 5.2.1 builder with all 12 open base classes, nine SRD species, four SRD backgrounds, class-limited skills, class-weighted ability arrays, and a searchable 50+ item equipment catalog. The finished sheet calculates HP, AC, proficiency, saves, Hit Dice, weapon actions, inventory, and level-specific spell-slot tracks, and remains editable per campaign.
 - Import D&D Beyond/user-exported character-sheet PDFs and portable JSON. Every inferred PDF field is shown for review before import.
 - Create, rename, resume, import, export, and delete locally autosaved campaigns. Each campaign can preserve multiple independently editable scenes, including split-party membership, maps, placements, lighting, notes, and travel locations. Character sheets are editable per campaign and can be attached to any reusable miniature without changing that miniature's links in another campaign.
@@ -52,7 +63,7 @@ Windows outputs are written to:
 
 ## Local AI
 
-Start any local server that exposes the OpenAI-compatible `/v1/chat/completions` API, such as `llama.cpp`, then open **Session → Local AI runtime** and enter its base URL and model alias. DnDRom enforces a loopback hostname for language-model, ComfyUI, and Scenery Studio endpoints. Prop Forge additionally offers an explicitly selected hosted Krea API route; only its compiled asset prompt is sent, its separately billed token stays in the Windows credential store, and source uploads remain local. When no language model is configured—or when it fails—DnDRom uses its offline map director and deterministic DM fallback.
+Start any local server that exposes the OpenAI-compatible `/v1/chat/completions` API, such as `llama.cpp`, then open **Session â†’ Local AI runtime** and enter its base URL and model alias. DnDRom enforces a loopback hostname for language-model, ComfyUI, and Scenery Studio endpoints. Prop Forge additionally offers an explicitly selected hosted Krea API route; only its compiled asset prompt is sent, its separately billed token stays in the Windows credential store, and source uploads remain local. When no language model is configuredâ€”or when it failsâ€”DnDRom uses its offline map director and deterministic DM fallback.
 
 The current slice uses one capable chat model for DM narration and map planning. The planned two-model router/utility split remains a benchmark-driven optimization; it is not required to play.
 
@@ -97,3 +108,5 @@ See [implementation status](docs/IMPLEMENTATION_STATUS.md), [rules coverage](doc
 ## Licensing and product naming
 
 DnDRom source code is MIT licensed. Bundled Kenney assets are CC0; provenance and the original notice are stored beside the files. `DnDRom` is a working product name. D&D trademarks, SRD attribution, and third-party character-sheet interoperability require legal review before public release.
+
+Workspace, direct-manipulation, and cache changes: [0.3.13 release notes](docs/WORKSPACE_AND_LOADING_0313.md).

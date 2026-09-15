@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { WorkspaceResizeHandle } from "./components/WorkspaceResizeHandle";
 import {
   Bot,
   Box,
@@ -27,6 +28,9 @@ import { ASSET_BY_ID } from "./domain/assets";
 import type { PlacementResolution } from "./domain/buildPlacement";
 import type { MapEntity, PanelTab } from "./domain/types";
 import { useCampaignStore } from "./state/campaignStore";
+import { WorldScenesDialog } from './components/WorldScenesDialog';
+import { SettlementUpgradeNotice } from './components/SettlementUpgradeNotice';
+import { enterWorldLocation } from './state/worldGeneration';
 import { EMPTY_MATERIAL_ASSETS, EMPTY_PROP_ASSETS, EMPTY_TOKEN_ASSETS, selectMaterialAssets, selectPropAssets } from "./state/selectors";
 import { AssetPalette } from "./components/AssetPalette";
 import { AssetThumbnail } from "./components/AssetThumbnail";
@@ -74,6 +78,7 @@ function Toasts({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: string) =>
 }
 
 export function App() {
+  const [worldScenesOpen, setWorldScenesOpen] = useState(false);
   const campaign = useCampaignStore((state) => state.campaign);
   const mode = useCampaignStore((state) => state.mode);
   const panelTab = useCampaignStore((state) => state.panelTab);
@@ -82,6 +87,8 @@ export function App() {
   const tokenAssets = useCampaignStore(selectTokenAssets);
   const propAssets = useCampaignStore(selectPropAssets);
   const materialAssets = useCampaignStore(selectMaterialAssets);
+  const basePlateLibrary = useCampaignStore(state=>state.basePlateLibrary);
+  const basePlateAssets=useMemo(()=>[...new Map([...basePlateLibrary,...(campaign.basePlateAssets??[])].map(asset=>[asset.id,asset])).values()],[basePlateLibrary,campaign.basePlateAssets]);
   const setMode = useCampaignStore((state) => state.setMode);
   const setPanelTab = useCampaignStore((state) => state.setPanelTab);
   const selectEntity = useCampaignStore((state) => state.selectEntity);
@@ -95,6 +102,10 @@ export function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [leftOpen, setLeftOpen] = useState(true);
+  const [leftWidth, setLeftWidth] = useState(() => Math.max(220, Math.min(560, Number(localStorage.getItem("dndrom.leftPanelWidth.v1")) || 312)));
+  const [rightWidth, setRightWidth] = useState(() => Math.max(220, Math.min(560, Number(localStorage.getItem("dndrom.rightPanelWidth.v1")) || 388)));
+  useEffect(() => { localStorage.setItem("dndrom.leftPanelWidth.v1", String(leftWidth)); }, [leftWidth]);
+  useEffect(() => { localStorage.setItem("dndrom.rightPanelWidth.v1", String(rightWidth)); }, [rightWidth]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "local">("local");
   const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
@@ -133,6 +144,15 @@ export function App() {
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 6500);
   };
 
+  useEffect(() => {
+    if (!campaign.map.sharedCacheOmitted) return;
+    const abort = new AbortController();
+    void enterWorldLocation(campaign.map.locationId, abort.signal).catch(error => {
+      if (!abort.signal.aborted) notify(`Could not rebuild this scene: ${String(error)}`, 'error');
+    });
+    return () => abort.abort();
+  }, [campaign.id, campaign.map.id, campaign.map.sharedCacheOmitted]);
+
   const place = (placement: PlacementResolution) => {
     if (!activeAssetId) return;
     const asset = ASSET_BY_ID.get(activeAssetId);
@@ -142,6 +162,7 @@ export function App() {
     const defaultBehavior = asset?.defaultBehavior ?? customProp?.defaultBehavior;
     const initialScale = customToken?.defaultPlacementScale ?? customProp?.defaultPlacementScale ?? 1;
     if (customToken && !campaign.tokenAssets?.some((entry) => entry.id === customToken.id)) addTokenAsset(customToken);
+    if(customToken){const state=useCampaignStore.getState();for(const id of [customToken.defaultBasePlateAssetId,...Object.values(customToken.formBasePlateAssignments??{})])if(id)state.addBasePlateToCampaign(id);}
     const placedAt = new Date();
     const mapEntity: MapEntity = {
       id: crypto.randomUUID(),
@@ -164,7 +185,9 @@ export function App() {
         placementVersion: 2,
       },
     };
+    setActiveAsset(null);
     addEntity(mapEntity);
+    setPanelTab("inspect");
   };
 
   const rotateSelected = () => {
@@ -240,7 +263,9 @@ export function App() {
         </div>
       </header>
 
-      <main className={`workspace ${creatorPage !== "table" ? "creator-page-active" : ""}`}>
+      <main data-workspace={creatorPage === "table" ? mode : creatorPage} className={`workspace ${creatorPage !== "table" ? "creator-page-active" : ""}`} style={{ "--left-panel-width": `${leftWidth}px`, "--right-panel-width": `${rightWidth}px` } as CSSProperties}>
+        {creatorPage === "table" && leftOpen && <WorkspaceResizeHandle side="left" width={leftWidth} otherWidth={rightOpen ? rightWidth : 0} onChange={setLeftWidth} />}
+        {creatorPage === "table" && rightOpen && <WorkspaceResizeHandle side="right" width={rightWidth} otherWidth={leftOpen ? leftWidth : 0} onChange={setRightWidth} />}
         {creatorPage === "scene" && <div className="creator-page-host"><WorldSplatPanel onNotify={notify} onBack={() => setCreatorPage("table")} onOpenPropForge={(request) => { setRequestedForgePropId(null); setRequestedWorldAsset(request); setPropForgeReturnPage("scene"); setCreatorPage("prop"); }} /></div>}
         {creatorPage === "character" && <div className="creator-page-host"><CharacterTokenStudio key={`character-forge-${campaign.id}-${characterDraftSession}`} onNotify={notify} onBack={() => setCreatorPage("table")} onOpenSheet={openSheet} requestedTokenId={requestedForgeTokenId} onRequestedTokenLoaded={() => setRequestedForgeTokenId(null)} onNewDraftReady={() => { setRequestedForgeTokenId(null); setCharacterDraftSession((value) => value + 1); }} /></div>}
         {creatorPage === "dice" && <div className="creator-page-host"><DiceForge onNotify={notify} onBack={() => setCreatorPage("table")} /></div>}
@@ -259,10 +284,12 @@ export function App() {
         )}
 
         {creatorPage === "table" && <section className="tabletop-area">
+          {mode === 'build' && <SettlementUpgradeNotice />}
           <div className="map-toolbar panel-surface">
             <SceneNavigator onNotify={notify} />
+            <button onClick={() => setWorldScenesOpen(true)}><MapPin size={14} />World scenes</button>
             <div className="map-name"><span className="map-theme-dot" /><div><strong>{campaign.map.name}</strong><small>{campaign.map.width} × {campaign.map.depth} m · {campaign.map.theme}</small></div></div>
-            {campaign.world && <label className="location-switcher"><MapPin size={13} /><select value={campaign.activeLocationId ?? ""} onChange={(event) => { const location = campaign.world?.locations.find((entry) => entry.id === event.target.value); if (location) travelToLocation(location.id, generateLocationMap(location)); }}>{campaign.world.locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label>}
+            {campaign.world && <label className="location-switcher"><MapPin size={13} /><select value={campaign.activeLocationId ?? ""} onChange={(event) => { const location = campaign.world?.locations.find((entry) => entry.id === event.target.value); if (location) { if (campaign.world?.manifest) void enterWorldLocation(location.id).catch(error => notify(String(error), 'error')); else travelToLocation(location.id, generateLocationMap(location)); } }}>{campaign.world.locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label>}
             {mode === "build" && <><span className="toolbar-divider" />
               <button className={showGrid ? "active" : ""} onClick={() => setShowGrid((value) => !value)}><Grid3X3 size={15} /> Grid <kbd>G</kbd></button>
               <button className={campaign.map.gridShape === "hex" ? "active" : ""} onClick={() => updateMapGridShape(campaign.map.gridShape === "hex" ? "square" : "hex")} title="Switch between square and hexagonal world-space grids"><Hexagon size={15} /> {campaign.map.gridShape === "hex" ? "Hex" : "Square"}</button>
@@ -270,7 +297,7 @@ export function App() {
               {activeAssetId && <div className="placing-pill"><AssetThumbnail assetId={activeAssetId} token={activeCustomToken} />Placing {ASSET_BY_ID.get(activeAssetId)?.name ?? activeCustomToken?.name}<button onClick={() => setActiveAsset(null)}><X size={13} /></button></div>}
             </>}
           </div>
-          <SceneViewport map={campaign.map} tokenAssets={tokenAssets.length ? tokenAssets : EMPTY_TOKEN_ASSETS} propAssets={propAssets.length ? propAssets : EMPTY_PROP_ASSETS} materialAssets={materialAssets.length ? materialAssets : EMPTY_MATERIAL_ASSETS} basePlateAssets={campaign.basePlateAssets} campaignBasePlateAssignments={campaign.basePlateAssignments} sceneBasePlateAssignments={activeScene?.basePlateAssignments} tokenCharacterLinks={campaign.tokenCharacterLinks} diceThemes={campaign.diceThemes} diceThemeAssignments={campaign.diceThemeAssignments} selectedEntityId={selectedEntityId} activeAssetId={mode === "build" ? activeAssetId : null} focusAssetId={mode === "play" ? activeCharacter?.tokenAssetId ?? null : null} showGrid={mode === "build" && showGrid} mode={mode} onPlace={place} onSelect={(id) => { selectEntity(id); if (!id) { if (mode === "play") setPlayHudCharacterId(null); return; } if (mode === "build") setPanelTab("inspect"); else { const entity = campaign.map.entities.find((entry) => entry.id === id); const token = tokenAssets.find((entry) => entry.id === entity?.assetId); const characterId = token ? campaign.tokenCharacterLinks?.[token.id] ?? token.characterId : undefined; const sheet = campaign.characters.find((entry) => entry.id === characterId); if (sheet && canViewCharacterSheet(sheet, mode, campaign.settings.dungeonMasterMode)) openSheet(sheet.id); else setPlayHudCharacterId(null); } }} onPipette={(assetId) => { setActiveAsset(assetId); notify(`Pipette selected ${ASSET_BY_ID.get(assetId)?.name ?? tokenAssets.find((entry) => entry.id === assetId)?.name ?? propAssets.find((entry) => entry.id === assetId)?.name ?? "asset"}.`, "success"); }} />
+          <SceneViewport map={campaign.map} tokenAssets={tokenAssets.length ? tokenAssets : EMPTY_TOKEN_ASSETS} propAssets={propAssets.length ? propAssets : EMPTY_PROP_ASSETS} materialAssets={materialAssets.length ? materialAssets : EMPTY_MATERIAL_ASSETS} basePlateAssets={basePlateAssets} campaignBasePlateAssignments={campaign.basePlateAssignments} sceneBasePlateAssignments={activeScene?.basePlateAssignments} tokenCharacterLinks={campaign.tokenCharacterLinks} diceThemes={campaign.diceThemes} diceThemeAssignments={campaign.diceThemeAssignments} selectedEntityId={selectedEntityId} activeAssetId={mode === "build" ? activeAssetId : null} focusAssetId={mode === "play" ? activeCharacter?.tokenAssetId ?? null : null} showGrid={mode === "build" && showGrid} mode={mode} onPlace={place} onSelect={(id) => { selectEntity(id); if (!id) { if (mode === "play") setPlayHudCharacterId(null); return; } if (mode === "build") setPanelTab("inspect"); else { const entity = campaign.map.entities.find((entry) => entry.id === id); const token = tokenAssets.find((entry) => entry.id === entity?.assetId); const characterId = token ? campaign.tokenCharacterLinks?.[token.id] ?? token.characterId : undefined; const sheet = campaign.characters.find((entry) => entry.id === characterId); if (sheet && canViewCharacterSheet(sheet, mode, campaign.settings.dungeonMasterMode)) openSheet(sheet.id); else setPlayHudCharacterId(null); } }} onPipette={(assetId) => { setActiveAsset(assetId); notify(`Pipette selected ${ASSET_BY_ID.get(assetId)?.name ?? tokenAssets.find((entry) => entry.id === assetId)?.name ?? propAssets.find((entry) => entry.id === assetId)?.name ?? "asset"}.`, "success"); }} />
           {mode === "play" && playHudCharacter && (
             <div className="play-hud panel-surface">
               <div className="hud-character"><span>{playHudCharacter.portrait ? <img src={playHudCharacter.portrait} alt="" /> : playHudCharacter.name[0]}</span><div><strong>{playHudCharacter.name}</strong><small>{playHudCharacter.ancestry} {playHudCharacter.className}</small></div></div>
@@ -299,6 +326,7 @@ export function App() {
       <Toasts toasts={toasts} dismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))} />
       <GenerationActivityCenter />
       <LocalSetupBanner onNotify={notify} />
+      <WorldScenesDialog open={worldScenesOpen} onClose={() => setWorldScenesOpen(false)} />
       <DisplaySettingsDialog open={displaySettingsOpen} onClose={() => setDisplaySettingsOpen(false)} />
     </div>
   );

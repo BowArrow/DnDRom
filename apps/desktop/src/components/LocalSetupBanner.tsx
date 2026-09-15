@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Check, Download, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { isUnreal } from "../migration/nativeBridge";
 import { formatRuntimeBytes, provisionLocalCreationSuite, runtimeProgressPercent, type LocalRuntimeProgress } from "../ai/localRuntime";
 
 interface LocalSetupBannerProps {
   onNotify: (message: string, tone?: "info" | "success" | "warning" | "error") => void;
 }
 
-const featureLabel = (feature: LocalRuntimeProgress["feature"]): string => feature === "characterPixal3d"
+const featureLabel = (feature: LocalRuntimeProgress["feature"]): string => feature === "languageModel" ? "Scene director and Dungeon Master" : feature === "characterPixal3d"
   ? "Pixal3D"
   : feature === "characterTrellis2"
     ? "TRELLIS.2"
@@ -43,7 +44,11 @@ export function LocalSetupBanner({ onNotify }: LocalSetupBannerProps) {
     }
   };
 
-  useEffect(() => { void provision(); }, []);
+  useEffect(() => {
+    // Native generation prepares the requested model on demand, preserving
+    // rendering headroom instead of provisioning the whole suite at startup.
+    if (isUnreal()) setDismissed(true); else void provision();
+  }, []);
 
   if (dismissed) return null;
   const percent = progress ? runtimeProgressPercent(progress) : 0;

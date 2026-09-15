@@ -1,3 +1,15 @@
+import { isUnreal } from "../migration/nativeBridge";
+import { NativeSceneViewport } from "../migration/NativeSceneViewport";
+import { buildingAccess } from "../domain/buildingAccess";
+import { resolveWorldWeather, weatherSurfaceState } from "../domain/worldWeather";
+import { WorldReveal } from "../domain/worldReveal";
+import { updateWorldAtmosphere } from "../rendering/worldAtmosphere";
+import { generateSpaceColonizedTree } from "../domain/worldArchitecture";
+import { buildTreeBarkMesh } from "../rendering/treeBarkMesh";
+import { treeFoliageTexture } from "../rendering/treeFoliageTexture";
+import { buildTreeImpostor } from "../rendering/treeImpostor";
+import { mapHeight } from "../domain/travelWorld";
+import { syncWorldHorizon, worldHeight, horizonReady } from "../rendering/worldHorizon";
 import { useEffect, useRef, useState } from "react";
 import * as pc from "playcanvas";
 import { ASSET_BY_ID, type AssetDefinition, type AssetPart } from "../domain/assets";
@@ -30,12 +42,16 @@ import { chunkIdForPosition, computeWorldVisibility, lightInfluencesVisibleChunk
 import { createHeightfield, sampleTerrainHeight, terrainNoise, terrainSurfaceWeights } from "../domain/worldProcedural";
 import { VolumetricCloudEffect } from "../rendering/volumetricClouds";
 import { createWorldGpuComputeRuntime, type WorldGpuComputeRuntime } from "../rendering/worldGpuCompute";
+import { buildContinuousRiverSurface } from "../rendering/riverSurfaceMesh";
+import { buildAssemblyMeshes, buildingAssemblyParts } from "../rendering/sceneAssemblyMesh";
+const worldGeometrySources = new WeakMap<pc.Entity, MapEntity["worldGeometry"]>();
+import { isInteriorMap } from "../domain/mapClassification";
 
 const materialForGeometry = (asset: MaterialAsset | undefined, assetId: string): MaterialAsset | undefined => asset
   ? { ...asset, projection: materialProjectionForGeometry(assetId, asset.projection) }
   : undefined;
 
-interface SceneViewportProps {
+export interface SceneViewportProps {
   map: GameMap;
   tokenAssets: TokenAsset[];
   propAssets?: PropAsset[];
@@ -62,7 +78,7 @@ interface SceneViewportProps {
 
 const cloudCoverageForMap = (map: GameMap): number => {
   const blueprint = map.generation?.blueprint;
-  if (!map.world || blueprint?.kind === "interior" || blueprint?.kind === "dungeon") return 0;
+  if (!map.world || isInteriorMap(map)) return 0;
   if (/storm|tempest|overcast|fog|mist/i.test(blueprint?.description ?? "")) return .7;
   if (blueprint?.biome.id === "desert") return .12;
   if (blueprint?.biome.id === "snow" || blueprint?.biome.id === "coast") return .55;
@@ -103,7 +119,7 @@ interface RuntimeScene {
   animatedMaterials: Set<pc.Material>;
   waterMaterials: Set<pc.StandardMaterial>;
   worldWaterMaterial: pc.ShaderMaterial;
-  grassMaterials: Map<string, pc.ShaderMaterial>;
+  grassMaterials: Map<string, pc.StandardMaterial>;
   gridRoot: pc.Entity;
   gridMaterial: pc.ShaderMaterial | null;
   fogRoot: pc.Entity;
@@ -127,6 +143,7 @@ interface RuntimeScene {
   diceTotalRevealed: boolean;
   onDiceSum: (presentation: DiceSumPresentation | null) => void;
   mapBounds: { width: number; depth: number };
+  terrainHeight: (x: number, z: number) => number;
   diceTaaSuspended: boolean;
   reducedMotion: boolean;
   orbit: { yaw: number; pitch: number; distance: number; target: pc.Vec3 };
@@ -138,8 +155,36 @@ interface RuntimeScene {
   worldStreaming: WorldChunkStreamingController;
   worldOverview: boolean;
   volumetricClouds: VolumetricCloudEffect | null;
+  cloudsAttached: boolean;
   worldCompute: WorldGpuComputeRuntime;
 }
+
+const syncVolumetricClouds = (runtime: RuntimeScene, map: GameMap): void => {
+  const coverage = cloudCoverageForMap(map);
+  const camera = runtime.camera.camera;
+  const canvas = runtime.app.graphicsDevice.canvas as HTMLCanvasElement;
+  // CameraFrame owns SceneColor and its command encoder. PlayCanvas' legacy
+  // PostEffectQueue cannot be layered over it safely on WebGPU; doing so ends
+  // the SceneColor pass early and invalidates the remainder of the frame.
+  // CameraFrame worlds use their environment plus height atmosphere; the
+  // raymarch fallback is reserved for the direct-forward camera path.
+  const legacyPostEffectAllowed = !runtime.lighting.cameraFrameRequested;
+  canvas.dataset.worldCloudRendering = coverage <= 0 ? "disabled" : legacyPostEffectAllowed ? "fullscreen-perlin-worley-raymarch+beer-lighting" : "camera-frame-atmosphere";
+  if (!camera) return;
+  if (coverage <= 0 || !legacyPostEffectAllowed) {
+    if (runtime.volumetricClouds && runtime.cloudsAttached) {
+      camera.postEffects.removeEffect(runtime.volumetricClouds);
+      runtime.cloudsAttached = false;
+    }
+    return;
+  }
+  if (!runtime.volumetricClouds) runtime.volumetricClouds = new VolumetricCloudEffect(runtime.app.graphicsDevice, runtime.camera);
+  runtime.volumetricClouds.setCoverage(coverage);
+  if (!runtime.cloudsAttached) {
+    camera.postEffects.addEffect(runtime.volumetricClouds);
+    runtime.cloudsAttached = true;
+  }
+};
 
 interface PresentedDiceRoll {
   expression: string;
@@ -326,8 +371,8 @@ const materialFor = (runtime: RuntimeScene, color: string, emissive?: string, ro
     // A photographed ground tile contains recognizable debris and cannot be
     // stamped across a generated region. World terrain keeps the seamless
     // procedural macro/detail maps and vertex field weights instead.
-    if (cacheVariant !== "world-terrain") void loadScannedPbrMaps(runtime.app, role).then((scanned) => {
-      if (scanned && runtime.materials.get(key) === material) {
+    if (!cacheVariant.startsWith("world-terrain") && !cacheVariant.startsWith("world-bridge") && !cacheVariant.startsWith("world-rock") && !cacheVariant.startsWith("world-interior") && !cacheVariant.startsWith("world-assembly")) void loadScannedPbrMaps(runtime.app, role).then((scanned) => {
+      if (scanned && !runtime.disposed && runtime.app.graphicsDevice && runtime.materials.get(key) === material) {
         applyScannedPbrMaps(material, role, scanned);
         if (finish) applyTabletopFinish(material, finish);
         applyPropPhysicalProfile(material, role);
@@ -441,11 +486,77 @@ const addPart = (runtime: RuntimeScene, parent: pc.Entity, asset: AssetDefinitio
       child.render.material = resinMaterial;
     } else {
       const role = inferMaterialRole(asset, definition, partIndex);
-      child.render.material = materialFor(runtime, definition.color, definition.emissive, role, asset.id.startsWith("token-") ? "painted-miniature" : tabletopFinishForRole(role));
+      const worldStructure = asset.id.startsWith("bridge-") || parent.tags.has("world:bridge");
+      const worldRock = asset.id === "rock" && parent.tags.has("world:vegetation");
+      const worldInterior = parent.tags.has("world:interior") || parent.tags.has("scene:interior");
+      const partMaterial = materialFor(
+        runtime,
+        definition.color,
+        definition.emissive,
+        role,
+        asset.id.startsWith("token-") ? "painted-miniature" : worldStructure || worldRock || worldInterior ? null : tabletopFinishForRole(role),
+        worldStructure ? `world-bridge-${role}` : worldRock ? `world-rock-${parent.tags.has("biome:desert") ? "desert" : "natural"}` : worldInterior ? `world-interior-${role}` : undefined,
+      );
+      if (worldInterior) {
+        // BSP primitives are scaled to room dimensions after construction.
+        // Their stock 0..1 UVs stretch a photographed scan across an entire
+        // floor or wall, producing the giant glossy arcs seen in taverns.
+        // Use authored albedo plus a repeating micro-normal only; no parallax,
+        // ORM gloss, or clear coat is allowed on generated room shells.
+        partMaterial.diffuseMap = null;
+        partMaterial.aoMap = null;
+        partMaterial.glossMap = null;
+        partMaterial.metalnessMap = null;
+        partMaterial.heightMap = null;
+        partMaterial.normalMapTiling.set(3.5, 3.5);
+        partMaterial.bumpiness = role.includes("wood") ? .22 : .16;
+        partMaterial.clearCoat = 0;
+        partMaterial.clearCoatGloss = 0;
+        partMaterial.glossInvert = false;
+        partMaterial.gloss = role.endsWith("floor") ? .11 : .08;
+        partMaterial.metalness = 0;
+        partMaterial.specular = new pc.Color(.11, .11, .1);
+        partMaterial.update();
+      }
+      if (worldStructure) {
+        // Bridges sit directly above dark water and their deck, rails, and
+        // supports heavily self-shadow. Preserve a small diffuse-like ambient
+        // bounce so the crossing remains readable from the tabletop camera;
+        // the value is deliberately well below the authored albedo so direct
+        // light and cast/received shadows still shape the structure.
+        const authored = toColor(definition.color);
+        // At this scale a tiled scan is mostly dark texels and the closely
+        // packed planks self-occlude. Use authored bridge color plus a normal
+        // response; terrain receives the bridge's shadow, while the bridge
+        // avoids sampling its own low-resolution shadow map.
+        partMaterial.diffuseMap = null;
+        partMaterial.aoMap = null;
+        partMaterial.glossMap = null;
+        partMaterial.metalnessMap = null;
+        partMaterial.heightMap = null;
+        partMaterial.diffuse = authored;
+        partMaterial.metalness = 0;
+        partMaterial.gloss = asset.id === "bridge-wood" ? .24 : .36;
+        partMaterial.emissive = authored;
+        partMaterial.emissiveIntensity = asset.id === "bridge-wood" ? .13 : .09;
+        partMaterial.update();
+      }
+      if (worldRock) {
+        const authored = parent.tags.has("biome:desert") ? toColor("#8e704e") : toColor(definition.color);
+        partMaterial.diffuseMap = null;
+        partMaterial.aoMap = null;
+        partMaterial.diffuse = authored;
+        partMaterial.metalness = 0;
+        partMaterial.gloss = .16;
+        partMaterial.emissive = authored;
+        partMaterial.emissiveIntensity = .28;
+        partMaterial.update();
+      }
+      child.render.material = partMaterial;
     }
     const isGroundLayer = /^(floor-|road-|water-)/.test(asset.id);
     child.render.castShadows = definition.shader !== "flame" && !isGroundLayer;
-    child.render.receiveShadows = true;
+    child.render.receiveShadows = !asset.id.startsWith("bridge-") && asset.id !== "rock";
   }
   parent.addChild(child);
 };
@@ -464,13 +575,14 @@ interface ProceduralMeshBuffers {
   normals: number[];
   colors: number[];
   indices: number[];
+  uvs?: number[];
 }
 
-const meshColor = (hex: string, shade = 1): [number, number, number, number] => {
+const meshColor = (hex: string, shade = 1, gamma = 2.2): [number, number, number, number] => {
   const color = toColor(hex);
   // StandardMaterial consumes vertex colors as linear values. Convert the
   // authored sRGB palette so daylight preserves mid-tone paint and timber.
-  const linear = (channel: number) => Math.pow(Math.max(0, Math.min(1, channel * shade)), 2.2);
+  const linear = (channel: number) => Math.pow(Math.max(0, Math.min(1, channel * shade)), gamma);
   return [Math.round(linear(color.r) * 255), Math.round(linear(color.g) * 255), Math.round(linear(color.b) * 255), 255];
 };
 
@@ -509,25 +621,6 @@ const appendOrientedBox = (buffers: ProceduralMeshBuffers, center: pc.Vec3, tang
   appendQuad(buffers, p000, p100, p101, p001, color);
 };
 
-const appendCylinder = (buffers: ProceduralMeshBuffers, start: pc.Vec3, end: pc.Vec3, bottomRadius: number, topRadius: number, color: [number, number, number, number], sides: number): void => {
-  const direction = end.clone().sub(start).normalize();
-  const reference = Math.abs(direction.y) > .92 ? new pc.Vec3(1, 0, 0) : new pc.Vec3(0, 1, 0);
-  const side = new pc.Vec3().cross(direction, reference).normalize();
-  const forward = new pc.Vec3().cross(direction, side).normalize();
-  const base = buffers.positions.length / 3;
-  for (let ring = 0; ring < 2; ring++) for (let segment = 0; segment < sides; segment++) {
-    const angle = segment / sides * Math.PI * 2, radius = ring ? topRadius : bottomRadius, center = ring ? end : start;
-    const radial = side.clone().mulScalar(Math.cos(angle)).add(forward.clone().mulScalar(Math.sin(angle)));
-    buffers.positions.push(center.x + radial.x * radius, center.y + radial.y * radius, center.z + radial.z * radius);
-    buffers.normals.push(radial.x, radial.y, radial.z);
-  }
-  appendColor(buffers.colors, color, sides * 2);
-  for (let segment = 0; segment < sides; segment++) {
-    const next = (segment + 1) % sides;
-    buffers.indices.push(base + segment, base + sides + segment, base + next, base + next, base + sides + segment, base + sides + next);
-  }
-};
-
 const appendEllipsoid = (buffers: ProceduralMeshBuffers, center: pc.Vec3, radius: pc.Vec3, color: [number, number, number, number], phase: number, segments: number, rings: number): void => {
   const base = buffers.positions.length / 3;
   for (let ring = 0; ring <= rings; ring++) {
@@ -535,96 +628,173 @@ const appendEllipsoid = (buffers: ProceduralMeshBuffers, center: pc.Vec3, radius
     for (let segment = 0; segment < segments; segment++) {
       const longitude = segment / segments * Math.PI * 2;
       const irregular = .83 + .17 * Math.sin(phase * 31.7 + segment * 2.17 + ring * 3.11);
-      const normal = new pc.Vec3(Math.cos(longitude) * Math.sin(latitude), Math.cos(latitude), Math.sin(longitude) * Math.sin(latitude));
-      buffers.positions.push(center.x + normal.x * radius.x * irregular, center.y + normal.y * radius.y * irregular, center.z + normal.z * radius.z * irregular);
+      const sphere = new pc.Vec3(Math.cos(longitude) * Math.sin(latitude), Math.cos(latitude), Math.sin(longitude) * Math.sin(latitude));
+      // An ellipsoid normal is the inverse-transpose of its scaled sphere
+      // normal, not the original sphere vector.
+      const normal = new pc.Vec3(sphere.x / Math.max(.001, radius.x), sphere.y / Math.max(.001, radius.y), sphere.z / Math.max(.001, radius.z)).normalize();
+      buffers.positions.push(center.x + sphere.x * radius.x * irregular, center.y + sphere.y * radius.y * irregular, center.z + sphere.z * radius.z * irregular);
       buffers.normals.push(normal.x, normal.y, normal.z);
+      buffers.uvs?.push(segment / segments, ring / rings);
     }
   }
   appendColor(buffers.colors, color, (rings + 1) * segments);
   for (let ring = 0; ring < rings; ring++) for (let segment = 0; segment < segments; segment++) {
     const next = (segment + 1) % segments, a = base + ring * segments + segment, b = base + ring * segments + next, c = a + segments, d = b + segments;
-    buffers.indices.push(a, c, b, b, c, d);
+    // Outward counter-clockwise winding. With the inverse order every visible
+    // canopy triangle was a backface and two-sided lighting flipped its normal.
+    buffers.indices.push(a, b, c, b, d, c);
   }
 };
 
 const finishProceduralMesh = (runtime: RuntimeScene, parent: pc.Entity, buffers: ProceduralMeshBuffers, material: pc.Material, name: string, castShadows = true): void => {
   if (!buffers.indices.length) return;
   const mesh = new pc.Mesh(runtime.app.graphicsDevice);
-  mesh.setPositions(buffers.positions); mesh.setNormals(buffers.normals); mesh.setColors32(buffers.colors); mesh.setIndices(buffers.indices); mesh.update(pc.PRIMITIVE_TRIANGLES);
+  mesh.setPositions(buffers.positions); mesh.setNormals(buffers.normals); if (buffers.uvs?.length === buffers.positions.length / 3 * 2) mesh.setUvs(0, buffers.uvs); mesh.setColors32(buffers.colors); mesh.setIndices(buffers.indices);
+  if (buffers.uvs?.length === buffers.positions.length / 3 * 2) mesh.setVertexStream(pc.SEMANTIC_TANGENT, pc.calculateTangents(buffers.positions, buffers.normals, buffers.uvs, buffers.indices), 4);
+  mesh.update(pc.PRIMITIVE_TRIANGLES);
   const child = new pc.Entity(name);
   child.addComponent("render", { meshInstances: [new pc.MeshInstance(mesh, material)], castShadows, receiveShadows: true });
   parent.addChild(child);
 };
 
 const addCgaBuilding = (runtime: RuntimeScene, parent: pc.Entity, mapEntity: MapEntity): void => {
-  if (mapEntity.worldGeometry?.kind !== "cga-building") return;
-  const geometry = mapEntity.worldGeometry, lod = mapEntity.chunkId ? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
-  const buffers: ProceduralMeshBuffers = { positions: [], normals: [], colors: [], indices: [] };
-  const foundation = meshColor(geometry.palette.foundation), wall = meshColor(geometry.palette.wall), trim = meshColor(geometry.palette.trim), glass = meshColor(geometry.palette.glass), door = meshColor(geometry.palette.door), roof = meshColor(geometry.palette.roof);
-  const minX = Math.min(...geometry.footprint.map((point) => point.x)), maxX = Math.max(...geometry.footprint.map((point) => point.x));
-  const minZ = Math.min(...geometry.footprint.map((point) => point.z)), maxZ = Math.max(...geometry.footprint.map((point) => point.z));
-  appendOrientedBox(buffers, new pc.Vec3((minX + maxX) / 2, .14, (minZ + maxZ) / 2), new pc.Vec3(1, 0, 0), new pc.Vec3(0, 0, 1), maxX - minX + .18, .28, maxZ - minZ + .18, foundation);
-  const tiles = lod === 2 ? geometry.facadeTiles.filter((tile) => tile.floor === 0) : geometry.facadeTiles;
-  for (const tile of tiles) {
-    const start = geometry.footprint[tile.edge], end = geometry.footprint[(tile.edge + 1) % geometry.footprint.length];
-    const length = Math.max(.001, Math.hypot(end.x - start.x, end.z - start.z));
-    const tangent = new pc.Vec3((end.x - start.x) / length, 0, (end.z - start.z) / length), outward = new pc.Vec3(tangent.z, 0, -tangent.x);
-    const center = new pc.Vec3(start.x + tangent.x * tile.offset, .28 + tile.floor * geometry.floorHeight + geometry.floorHeight / 2, start.z + tangent.z * tile.offset);
-    appendOrientedBox(buffers, center, tangent, outward, tile.width * .96, geometry.floorHeight, geometry.wallThickness, wall);
-    if (lod === 2 || tile.kind === "wall") continue;
-    const openingHeight = tile.kind === "door" ? Math.min(2.25, geometry.floorHeight * .84) : geometry.floorHeight * .42;
-    const openingY = tile.kind === "door" ? .3 + openingHeight / 2 : .28 + tile.floor * geometry.floorHeight + geometry.floorHeight * .57;
-    const openingCenter = new pc.Vec3(start.x + tangent.x * tile.offset + outward.x * (geometry.wallThickness * .62), openingY, start.z + tangent.z * tile.offset + outward.z * (geometry.wallThickness * .62));
-    appendOrientedBox(buffers, openingCenter, tangent, outward, Math.min(tile.width * .58, tile.kind === "door" ? 1.08 : 1.2), openingHeight, .055, tile.kind === "door" ? door : glass);
-    if (tile.kind === "window" && lod === 0) {
-      appendOrientedBox(buffers, openingCenter, tangent, outward, Math.min(tile.width * .7, 1.34), .075, .085, trim);
-      appendOrientedBox(buffers, openingCenter, tangent, outward, .07, openingHeight * 1.05, .085, trim);
-    }
+  const geometry = mapEntity.worldGeometry;
+  if (geometry?.kind !== "cga-building" && geometry?.kind !== "assembly") return;
+  const lod = mapEntity.chunkId ? runtime.worldStreaming.residentLod(mapEntity.chunkId) ?? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
+  const parts = geometry.kind === "assembly" ? geometry.parts : buildingAssemblyParts(geometry);
+  const roles = { ground: "earth", masonry: "stone-wall", timber: "wood-structural", roof: "roof", foliage: "foliage" } as const;
+  for (const [role, buffers] of buildAssemblyMeshes(parts, lod)) {
+    const material = materialFor(runtime, "#ffffff", undefined, roles[role], "printed-board", `world-assembly-${role}`);
+    material.diffuseVertexColor = true; material.cull = pc.CULLFACE_NONE;
+    material.heightMap = null; material.heightMapFactor = 0;
+    material.update();
+    finishProceduralMesh(runtime, parent, buffers, material, `${mapEntity.name} ${role} LOD ${lod}`);
+    parent.children[parent.children.length - 1].tags.add(`world-material:${role}`);
   }
-  const top = .28 + geometry.floors * geometry.floorHeight, overhang = .32;
-  if (geometry.roof === "flat" || lod === 2) appendOrientedBox(buffers, new pc.Vec3((minX + maxX) / 2, top + .12, (minZ + maxZ) / 2), new pc.Vec3(1, 0, 0), new pc.Vec3(0, 0, 1), maxX - minX + overhang * 2, .24, maxZ - minZ + overhang * 2, roof);
-  else {
-    const a = new pc.Vec3(minX - overhang, top, minZ - overhang), b = new pc.Vec3(maxX + overhang, top, minZ - overhang), c = new pc.Vec3(maxX + overhang, top, maxZ + overhang), d = new pc.Vec3(minX - overhang, top, maxZ + overhang);
-    if (geometry.roof === "gable") {
-      const ridgeA = new pc.Vec3(minX - overhang, top + 1.25, (minZ + maxZ) / 2), ridgeB = new pc.Vec3(maxX + overhang, top + 1.25, (minZ + maxZ) / 2);
-      appendQuad(buffers, a, b, ridgeB, ridgeA, roof); appendQuad(buffers, ridgeA, ridgeB, c, d, roof);
-      appendTriangle(buffers, a, ridgeA, d, trim); appendTriangle(buffers, b, c, ridgeB, trim);
-    } else {
-      const peak = new pc.Vec3((minX + maxX) / 2, top + 1.35, (minZ + maxZ) / 2);
-      appendTriangle(buffers, a, b, peak, roof); appendTriangle(buffers, b, c, peak, roof); appendTriangle(buffers, c, d, peak, roof); appendTriangle(buffers, d, a, peak, roof);
-    }
-  }
-  const material = materialFor(runtime, "#ffffff", undefined, "stone-wall", "printed-board", "world-cga-building");
-  material.diffuseVertexColor = true; material.cull = pc.CULLFACE_NONE; material.update();
-  finishProceduralMesh(runtime, parent, buffers, material, `${mapEntity.name} CGA LOD ${lod}`);
   parent.tags.add(`world-lod:${lod}`);
 };
 
-const addSpaceColonizedTree = (runtime: RuntimeScene, parent: pc.Entity, mapEntity: MapEntity): void => {
+const treePrototypes = new Map<string, ReturnType<typeof generateSpaceColonizedTree>>();
+const forestMeshes = new WeakMap<pc.Application, Map<string, Array<{mesh:pc.Mesh;material:pc.Material}>>>();
+
+const addSpaceColonizedTree = (runtime: RuntimeScene, parent: pc.Entity, mapEntity: MapEntity, forcedLod?:0|1|2): void => {
   if (mapEntity.worldGeometry?.kind !== "space-colonized-tree") return;
-  const geometry = mapEntity.worldGeometry, lod = mapEntity.chunkId ? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
-  const buffers: ProceduralMeshBuffers = { positions: [], normals: [], colors: [], indices: [] };
-  const branchStride = lod === 0 ? 1 : lod === 1 ? 2 : 5;
-  geometry.branches.forEach((branch, index) => {
-    if (index % branchStride && branch.startRadius < .1) return;
-    appendCylinder(buffers, new pc.Vec3(branch.start.x, branch.start.y, branch.start.z), new pc.Vec3(branch.end.x, branch.end.y, branch.end.z), branch.startRadius, branch.endRadius, meshColor(geometry.barkColor, .82 + (index % 5) * .035), lod === 0 ? 7 : lod === 1 ? 5 : 4);
+  const stored = mapEntity.worldGeometry;
+  const prototypeKey = stored.prototypeSeed === undefined ? "" : stored.style + ":" + stored.prototypeSeed;
+  let geometry = prototypeKey ? treePrototypes.get(prototypeKey) : stored;
+  if (!geometry) { geometry = generateSpaceColonizedTree(stored.prototypeSeed!, stored.style); if (treePrototypes.size > 128) treePrototypes.clear(); treePrototypes.set(prototypeKey, geometry); }
+  const lod = forcedLod ?? (mapEntity.chunkId ? runtime.worldStreaming.residentLod(mapEntity.chunkId) ?? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0);
+  let cache = forestMeshes.get(runtime.app);
+  if (!cache) { cache = new Map(); forestMeshes.set(runtime.app, cache); const owned = cache; runtime.app.once("destroy", () => { for (const meshes of owned.values()) for (const {mesh} of meshes) { mesh.decRefCount(); if (mesh.refCount < 1) mesh.destroy(); } owned.clear(); }); }
+  const cacheKey = prototypeKey + ":" + lod;
+  const cached = prototypeKey ? cache.get(cacheKey) : undefined;
+  const barkMaterial = materialFor(runtime, "#ffffff", undefined, "bark", null, "world-space-colonized-bark");
+  const leafKey = `botanical-leaves:${geometry.style}`;
+  let leafMaterial = runtime.materials.get(leafKey);
+  if (!leafMaterial) {
+    leafMaterial = new pc.StandardMaterial();
+    const texture = treeFoliageTexture(runtime.app.graphicsDevice, geometry.style);
+    leafMaterial.diffuseMap = texture; leafMaterial.opacityMap = texture; leafMaterial.opacityMapChannel = "a";
+    leafMaterial.alphaTest = 90 / 255; leafMaterial.diffuseVertexColor = true;
+    leafMaterial.cull = pc.CULLFACE_NONE; leafMaterial.twoSidedLighting = true;
+    configureWorldVegetationMaterial(leafMaterial); runtime.animatedMaterials.add(leafMaterial);
+    runtime.materials.set(leafKey, leafMaterial);
+  }
+  if (cached) {
+    cached.forEach(({mesh,material}) => { const child = new pc.Entity("Instanced tree"); child.addComponent("render", { meshInstances: [new pc.MeshInstance(mesh, material)], castShadows: lod < 2, receiveShadows: true }); parent.addChild(child); });
+  } else {
+  if (lod === 2) {
+    const impostor = buildTreeImpostor(runtime.app.graphicsDevice, geometry);
+    finishProceduralMesh(runtime,parent,impostor.buffers,impostor.material,`${mapEntity.name} crown impostor`,false);
+  } else {
+  // Bark maps already contain their albedo. Multiplying them by dark brown
+  // vertex albedo made trunks nearly black and hid their surface detail.
+  const barkBuffers = buildTreeBarkMesh(geometry, lod, [255, 255, 255, 255]);
+  const leafBuffers: ProceduralMeshBuffers = { positions: [], normals: [], colors: [], indices: [], uvs: [] };
+  // Keep every crown region at all tree LODs; reduce samples inside each region.
+  const clusters = geometry.leafClusters;
+  clusters.forEach((cluster, index) => {
+    const leaves = lod === 0 ? 40 : lod === 1 ? 20 : 10;
+    const random = (i:number,k:number) => { const v=Math.sin((index*137+i*71+k*31+cluster.phase)*12.9898)*43758.5453;return v-Math.floor(v); };
+    for(let leaf=0;leaf<leaves;leaf++) {
+      const azimuth=random(leaf,0)*Math.PI*2, elevation=random(leaf,1)*2-1, radial=Math.sqrt(1-elevation*elevation);
+      const center=new pc.Vec3(cluster.position.x+Math.cos(azimuth)*radial*cluster.radius.x*.8,cluster.position.y+elevation*cluster.radius.y*.8,cluster.position.z+Math.sin(azimuth)*radial*cluster.radius.z*.8);
+      const evergreen = geometry.style === "pine" || geometry.style === "cypress";
+      const length=(evergreen ? .48 : .3)*Math.sqrt(40/leaves)*( .75+random(leaf,2)*.65);
+      const direction=new pc.Vec3(Math.cos(azimuth),.2+random(leaf,3)*.55,Math.sin(azimuth)).normalize();
+      const side=new pc.Vec3(-Math.sin(azimuth),0,Math.cos(azimuth)).mulScalar(length*(evergreen ? .72 : .58));
+      const tip=direction.clone().mulScalar(length),base=leafBuffers.positions.length/3;
+      const points=[center.clone().sub(tip).sub(side),center.clone().sub(tip).add(side),center.clone().add(tip).sub(side),center.clone().add(tip).add(side)];
+      const color=meshColor(geometry.leafColors[(index+leaf)%2],.7+random(leaf,4)*.35,1.45);
+      const leafNormal = new pc.Vec3().cross(side, direction).normalize();
+      points.forEach((p,i)=>{leafBuffers.positions.push(p.x,p.y,p.z);leafBuffers.normals.push(leafNormal.x,leafNormal.y,leafNormal.z);leafBuffers.uvs!.push(i%2,i<2?0:1);leafBuffers.colors.push(...color);});
+      leafBuffers.indices.push(base,base+1,base+2,base+1,base+3,base+2);
+    }
   });
-  const clusters = lod === 0 ? geometry.leafClusters : geometry.leafClusters.filter((_, index) => index % (lod === 1 ? 2 : 4) === 0);
-  clusters.forEach((cluster, index) => appendEllipsoid(buffers, new pc.Vec3(cluster.position.x, cluster.position.y, cluster.position.z), new pc.Vec3(cluster.radius.x, cluster.radius.y, cluster.radius.z), meshColor(geometry.leafColors[index % 2], .88 + cluster.phase * .14), cluster.phase, lod === 0 ? 8 : 6, lod === 0 ? 5 : 3));
-  const material = materialFor(runtime, "#ffffff", undefined, "foliage", "printed-board", "world-space-colonized-vegetation");
-  material.diffuseVertexColor = true;
-  if (!runtime.animatedMaterials.has(material)) { configureWorldVegetationMaterial(material); runtime.animatedMaterials.add(material); } else material.update();
-  finishProceduralMesh(runtime, parent, buffers, material, `${mapEntity.name} SCA LOD ${lod}`);
+
+  barkMaterial.diffuseVertexColor = true; barkMaterial.clearCoat = 0; barkMaterial.gloss = .08;
+  leafMaterial.diffuseVertexColor = true; leafMaterial.clearCoat = 0; leafMaterial.gloss = .06; leafMaterial.cull = pc.CULLFACE_NONE; leafMaterial.twoSidedLighting = true;
+  for (const material of [barkMaterial, leafMaterial]) {
+    if (!runtime.animatedMaterials.has(material)) { configureWorldVegetationMaterial(material, material === barkMaterial); runtime.animatedMaterials.add(material); } else material.update();
+  }
+  finishProceduralMesh(runtime, parent, barkBuffers, barkMaterial, `${mapEntity.name} bark LOD ${lod}`, lod < 2);
+  finishProceduralMesh(runtime, parent, leafBuffers, leafMaterial, `${mapEntity.name} leaves LOD ${lod}`, lod < 2);
+  }
+  if (prototypeKey) { const meshes = (parent.findComponents("render") as pc.RenderComponent[]).flatMap(render => render.meshInstances.map(instance => ({mesh:instance.mesh,material:instance.material}))); meshes.forEach(({mesh}) => mesh.incRefCount()); cache.set(cacheKey, meshes);
+    while(cache.size>96){const oldest=cache.keys().next().value!;const obsolete=cache.get(oldest)!;cache.delete(oldest);for(const {mesh} of obsolete){mesh.decRefCount();if(mesh.refCount<1)mesh.destroy();}} }
+  }
+  if (stored.instances?.length) {
+    const matrices = new Float32Array(stored.instances.length * 16), transform = new pc.Mat4(), rotation = new pc.Quat();
+    const bounds = new pc.BoundingBox(), transformed = new pc.BoundingBox(); let first = true;
+    stored.instances.forEach((placement, index) => {
+      transform.setTRS(new pc.Vec3(placement.x - mapEntity.position.x, placement.y - mapEntity.position.y, placement.z - mapEntity.position.z), rotation.setFromEulerAngles(0, placement.rotation, 0), new pc.Vec3(placement.scale, placement.scale, placement.scale)); matrices.set(transform.data, index * 16);
+      for (const render of parent.findComponents("render") as pc.RenderComponent[]) for (const instance of render.meshInstances) { transformed.setFromTransformedAabb(instance.mesh.aabb, transform); if (first) { bounds.copy(transformed); first = false; } else bounds.add(transformed); }
+    });
+    bounds.halfExtents.addScalar(1);
+    const buffer = new pc.VertexBuffer(runtime.app.graphicsDevice, pc.VertexFormat.getDefaultInstancingFormat(runtime.app.graphicsDevice), stored.instances.length, { data: matrices.buffer });
+    parent.once("destroy", () => buffer.destroy());
+    for (const render of parent.findComponents("render") as pc.RenderComponent[]) for (const instance of render.meshInstances) { instance.setInstancing(buffer, true); instance.setCustomAabb(bounds); }
+  }
+  parent.children.forEach((child) => child.tags.add(child.name.includes("bark") ? "world-material:timber" : "world-material:foliage"));
   parent.tags.add(`world-lod:${lod}`);
+};
+
+const syncWorldLandscape = (runtime:RuntimeScene,map:GameMap):void => {
+  syncWorldHorizon(runtime.app,runtime.camera,map,runtime.lighting.key,(parent,plants,lod,grass)=>{
+    if(grass.length){
+      const position=parent.getPosition(),instances=[];
+      for(let i=0;i<grass.length;i+=5)instances.push({x:grass[i],y:grass[i+1],z:grass[i+2],rotation:grass[i+3],scale:grass[i+4]});
+      const batch=new pc.Entity("Regional meadow");parent.addChild(batch);
+      addProceduralGeometry(runtime,batch,{id:"atlas-grass",assetId:"shrub-broadleaf",name:"Regional meadow",position:{x:position.x,y:0,z:position.z},rotation:{x:0,y:0,z:0},scale:{x:1,y:1,z:1},worldGeometry:{kind:"ground-cover",color:"#527d3e",instances}});
+    }
+    for(const species of [0,1]){
+      const placements:NonNullable<import("../domain/types").WorldTreeGeometry["instances"]>=[];
+      for(let i=0;i<plants.length;i+=6)if(plants[i+5]===species)placements.push({x:plants[i],y:plants[i+1],z:plants[i+2],rotation:plants[i+3],scale:plants[i+4]});
+      if(!placements.length)continue;
+      const style=species?"pine":"broadleaf",position=parent.getPosition();
+      const entity:MapEntity={id:'atlas-forest',assetId:'tree-broadleaf',name:'Regional forest',position:{x:position.x,y:0,z:position.z},rotation:{x:0,y:0,z:0},scale:{x:1,y:1,z:1},worldGeometry:{kind:'space-colonized-tree',style,prototypeSeed:(map.world?.seed??1)+species*7919,instances:placements,branches:[],leafClusters:[],barkColor:'#493b29',leafColors:['#3d632c','#52783b']}};
+      const batch=new pc.Entity('Canopy family');parent.addChild(batch);addSpaceColonizedTree(runtime,batch,entity,lod);
+    }
+  });
 };
 
 const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEntity: MapEntity, _definition?: AssetDefinition): void => {
   if (!mapEntity.worldGeometry) return;
-  const lod = mapEntity.chunkId ? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
-  if (mapEntity.worldGeometry.kind === "cga-building") { addCgaBuilding(runtime, parent, mapEntity); return; }
+  const lod = mapEntity.chunkId ? runtime.worldStreaming.residentLod(mapEntity.chunkId) ?? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
+  if (mapEntity.worldGeometry.kind === "cga-building" || mapEntity.worldGeometry.kind === "assembly") { addCgaBuilding(runtime, parent, mapEntity); return; }
   if (mapEntity.worldGeometry.kind === "space-colonized-tree") { addSpaceColonizedTree(runtime, parent, mapEntity); return; }
   if (mapEntity.worldGeometry.kind === "road-ribbon" || mapEntity.worldGeometry.kind === "river-ribbon") {
     const geometry = mapEntity.worldGeometry;
+    if (geometry.kind === "river-ribbon") {
+      const buffers = buildContinuousRiverSurface(geometry.paths, mapEntity.position, geometry.bankDepth);
+      if (!buffers.indices.length) return;
+      const mesh = new pc.Mesh(runtime.app.graphicsDevice);
+      mesh.setPositions(buffers.positions); mesh.setNormals(buffers.normals); mesh.setUvs(0, buffers.uvs); mesh.setColors32(buffers.colors); mesh.setIndices(buffers.indices); mesh.update(pc.PRIMITIVE_TRIANGLES);
+      const child = new pc.Entity(`${mapEntity.name} continuous water LOD ${lod}`);
+      child.addComponent("render", { meshInstances: [new pc.MeshInstance(mesh, runtime.worldWaterMaterial)], castShadows: false, receiveShadows: true });
+      parent.tags.add(`world-lod:${lod}`); parent.addChild(child);
+      return;
+    }
     const positions: number[] = [], normals: number[] = [], uvs: number[] = [], colors: number[] = [], indices: number[] = [];
     for (const path of geometry.paths) {
       if (path.length < 2) continue;
@@ -638,25 +808,19 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
         // Roads use a feathered six-column decal rather than one hard quad per
         // path segment. The center pair keeps wheel-worn variation while the
         // transparent shoulders visually dissolve into triplanar terrain.
-        const strips = geometry.kind === "river-ribbon" ? [-1, 0, 1] : [-1, -.76, -.2, .2, .76, 1];
+        const strips = [-1, -.76, -.2, .2, .76, 1];
         for (const strip of strips) {
           positions.push(point.x - mapEntity.position.x + sideX * strip, point.y - mapEntity.position.y, point.z - mapEntity.position.z + sideZ * strip);
           normals.push(0, 1, 0);
           uvs.push((strip + 1) * .5, distance / 3);
-          if (geometry.kind === "river-ribbon") {
-            const edge = Math.abs(strip), flowX = dx / length, flowZ = dz / length;
-            const depth = Math.max(.08, geometry.bankDepth ?? .5);
-            colors.push(Math.round(edge * 255), Math.round((flowX * .5 + .5) * 255), Math.round((flowZ * .5 + .5) * 255), Math.round(Math.min(1, depth / 3.2) * 255));
-          } else {
-            const edge = Math.abs(strip), wear = .84 + .12 * Math.sin(distance * .41 + point.x * .17 - point.z * .13);
-            const base = geometry.surface === "stone" ? [116, 113, 104] : geometry.surface === "wood" ? [111, 76, 46] : [116, 80, 47];
-            const alpha = edge >= .999 ? 0 : edge > .7 ? 150 : 245;
-            colors.push(Math.round(base[0] * wear), Math.round(base[1] * wear), Math.round(base[2] * wear), alpha);
-          }
+          const edge = Math.abs(strip), wear = .84 + .12 * Math.sin(distance * .41 + point.x * .17 - point.z * .13);
+          const base = geometry.surface === "stone" ? [116, 113, 104] : geometry.surface === "wood" ? [111, 76, 46] : [116, 80, 47];
+          const alpha = edge >= .999 ? 0 : edge > .7 ? 150 : 245;
+          colors.push(Math.round(base[0] * wear), Math.round(base[1] * wear), Math.round(base[2] * wear), alpha);
         }
       }
       for (let index = 0; index < path.length - 1; index++) {
-        const stride = geometry.kind === "river-ribbon" ? 3 : 6;
+        const stride = 6;
         const a = base + index * stride, next = a + stride;
         for (let strip = 0; strip < stride - 1; strip++) indices.push(a + strip, next + strip, a + strip + 1, a + strip + 1, next + strip, next + strip + 1);
       }
@@ -664,11 +828,10 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
     if (!indices.length) return;
     const mesh = new pc.Mesh(runtime.app.graphicsDevice);
     mesh.setPositions(positions); mesh.setNormals(normals); mesh.setUvs(0, uvs); mesh.setColors32(colors); mesh.setIndices(indices); mesh.update(pc.PRIMITIVE_TRIANGLES);
-    const water = geometry.kind === "river-ribbon";
-    const role: PbrMaterialRole = water ? "water" : geometry.surface === "stone" ? "stone-floor" : geometry.surface === "wood" ? "wood-floor" : "earth";
-    const color = water ? "#3f7883" : geometry.surface === "stone" ? "#716f68" : geometry.surface === "wood" ? "#765033" : "#735536";
-    const material = water ? runtime.worldWaterMaterial : materialFor(runtime, color, undefined, role, "printed-board", `world-${geometry.kind}-${geometry.surface}`);
-    if (!water && material instanceof pc.StandardMaterial) {
+    const role: PbrMaterialRole = geometry.surface === "stone" ? "stone-floor" : geometry.surface === "wood" ? "wood-floor" : "earth";
+    const color = geometry.surface === "stone" ? "#716f68" : geometry.surface === "wood" ? "#765033" : "#735536";
+    const material = materialFor(runtime, color, undefined, role, null, `world-${geometry.kind}-${geometry.surface}`);
+    if (material instanceof pc.StandardMaterial) {
       material.diffuseVertexColor = true;
       material.opacityVertexColor = true;
       material.opacityVertexColorChannel = "a";
@@ -678,14 +841,15 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
       material.update();
     }
     const child = new pc.Entity(`${mapEntity.name} LOD ${lod}`);
-    child.addComponent("render", { meshInstances: [new pc.MeshInstance(mesh, material)], castShadows: false, receiveShadows: !water });
+    child.addComponent("render", { meshInstances: [new pc.MeshInstance(mesh, material)], castShadows: false, receiveShadows: true });
     parent.tags.add(`world-lod:${lod}`); parent.addChild(child);
     return;
   }
   if (mapEntity.worldGeometry.kind === "ground-cover") {
     const geometry = mapEntity.worldGeometry;
     const positions: number[] = [], normals: number[] = [], uvs: number[] = [], colors: number[] = [], indices: number[] = [];
-    const instances = lod === 1 ? geometry.instances.filter((_, index) => index % 2 === 0) : lod === 2 ? geometry.instances.filter((_, index) => index % 5 === 0) : geometry.instances;
+    // Retain spatial coverage. Array-index decimation selected entire rows.
+    const instances = geometry.instances;
     const baseColor = toColor(geometry.color);
     const bladeCount = lod === 0 ? 7 : lod === 1 ? 4 : 2;
     for (let blade = 0; blade < bladeCount; blade++) {
@@ -694,14 +858,18 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
         const radius = blade ? .08 + (blade % 3) * .055 : 0;
         const originX = Math.cos(angle * 1.7) * radius;
         const originZ = Math.sin(angle * 1.7) * radius;
-        const width = .032 + (blade % 2) * .012;
-        const height = .5 + ((blade * 37) % 7) * .055;
+        const width = (.024 + (blade % 2) * .01) * (7 / bladeCount);
+        const height = .3 + ((blade * 37) % 7) * .035;
         const dx = Math.cos(angle) * width, dz = Math.sin(angle) * width, base = positions.length / 3;
         positions.push(originX - dx, 0, originZ - dz, originX + dx, 0, originZ + dz, originX - dx * .68, height * .52, originZ - dz * .68, originX + dx * .68, height * .52, originZ + dz * .68, originX, height, originZ, originX, height, originZ);
-        for (let vertex = 0; vertex < 6; vertex++) normals.push(0, .72, 1);
+        for (let vertex = 0; vertex < 6; vertex++) normals.push(-Math.sin(angle) * .89, .456, Math.cos(angle) * .89);
         uvs.push(0, 0, 1, 0, .15, .52, .85, .52, .48, 1, .52, 1);
         const variation = .78 + ((blade * 29) % 11) / 50;
-        for (let vertex = 0; vertex < 6; vertex++) colors.push(Math.round(baseColor.r * variation * 255), Math.round(baseColor.g * variation * 255), Math.round(baseColor.b * variation * 255), Math.round(phase * 255));
+        for (let vertex = 0; vertex < 6; vertex++) {
+          const tip = vertex < 2 ? 0 : vertex < 4 ? .52 : 1;
+          const rootShade = .52 + tip * .48;
+          colors.push(Math.round(baseColor.r * variation * rootShade * 255), Math.round(baseColor.g * variation * rootShade * 255), Math.round(baseColor.b * variation * rootShade * 255), Math.round(phase * 255));
+        }
         indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3, base + 2, base + 4, base + 3, base + 3, base + 4, base + 5);
     }
     if (!indices.length || !instances.length) { parent.tags.add(`world-lod:${lod}`); return; }
@@ -724,6 +892,7 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
     });
     const instanceBuffer = new pc.VertexBuffer(runtime.app.graphicsDevice, pc.VertexFormat.getDefaultInstancingFormat(runtime.app.graphicsDevice), instances.length, { data: matrices.buffer });
     meshInstance.setInstancing(instanceBuffer, false);
+    parent.once("destroy", () => instanceBuffer.destroy());
     const computeJob = runtime.worldCompute.createGrassCullingJob({
       meshInstance,
       matrices,
@@ -731,7 +900,7 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
       instanceRadius: 1.1,
     });
     if (computeJob) parent.once("destroy", () => computeJob.destroy());
-    child.addComponent("render", { meshInstances: [meshInstance], castShadows: lod === 0, receiveShadows: true });
+    child.addComponent("render", { meshInstances: [meshInstance], castShadows: false, receiveShadows: true });
     parent.tags.add(`world-lod:${lod}`); parent.addChild(child);
     return;
   }
@@ -741,11 +910,12 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
     const cellSize = geometry.size / geometry.resolution;
     const centerX = geometry.originX + geometry.size / 2, centerZ = geometry.originZ + geometry.size / 2;
     const stride = geometry.resolution + 1;
-    type WaterVertex = { x: number; z: number; depth: number; edge: number; flowX: number; flowZ: number };
+    type WaterVertex = { x: number; y: number; z: number; depth: number; edge: number; flowX: number; flowZ: number };
     const sampleAt = (column: number, row: number): WaterVertex => {
       const index = row * stride + column;
       return {
         x: geometry.originX + column * cellSize - centerX,
+        y: (geometry.surfaceHeights?.[index] ?? geometry.waterLevel) - geometry.waterLevel,
         z: geometry.originZ + row * cellSize - centerZ,
         depth: geometry.depthField?.[index] ?? (geometry.wetCells[index] ? .5 : -.5),
         edge: geometry.shoreline?.[index] ?? 0,
@@ -756,25 +926,26 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
     const midpoint = (a: WaterVertex, b: WaterVertex): WaterVertex => {
       const denominator = a.depth - b.depth;
       const t = Math.max(.06, Math.min(.94, Math.abs(denominator) > .0001 ? a.depth / denominator : .5));
-      return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t, depth: 0, edge: Math.max(.82, a.edge + (b.edge - a.edge) * t), flowX: a.flowX + (b.flowX - a.flowX) * t, flowZ: a.flowZ + (b.flowZ - a.flowZ) * t };
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t, depth: 0, edge: 1, flowX: a.flowX + (b.flowX - a.flowX) * t, flowZ: a.flowZ + (b.flowZ - a.flowZ) * t };
     };
     const emit = (polygon: WaterVertex[]) => {
       if (polygon.length < 3) return;
       const base = positions.length / 3;
       for (const vertex of polygon) {
-        positions.push(vertex.x, 0, vertex.z);
+        positions.push(vertex.x, vertex.y, vertex.z);
         normals.push(0, 1, 0);
         uvs.push((vertex.x + centerX) / 6, (vertex.z + centerZ) / 6);
         colors.push(Math.round(vertex.edge * 255), Math.round((vertex.flowX * .5 + .5) * 255), Math.round((vertex.flowZ * .5 + .5) * 255), Math.round(Math.min(1, Math.max(.04, vertex.depth) / 3.2) * 255));
       }
       for (let index = 1; index < polygon.length - 1; index++) indices.push(base, base + index + 1, base + index);
     };
-    for (let row = 0; row < geometry.resolution; row++) for (let column = 0; column < geometry.resolution; column++) {
-      const topLeft = sampleAt(column, row), topRight = sampleAt(column + 1, row), bottomRight = sampleAt(column + 1, row + 1), bottomLeft = sampleAt(column, row + 1);
+    const waterStep = lod === 0 ? 1 : lod === 1 ? 2 : 4;
+    for (let row = 0; row < geometry.resolution; row += waterStep) for (let column = 0; column < geometry.resolution; column += waterStep) {
+      const topLeft = sampleAt(column, row), topRight = sampleAt(column + waterStep, row), bottomRight = sampleAt(column + waterStep, row + waterStep), bottomLeft = sampleAt(column, row + waterStep);
       const mask = (geometry.wetCells[row * stride + column] ? 1 : 0)
-        | (geometry.wetCells[row * stride + column + 1] ? 2 : 0)
-        | (geometry.wetCells[(row + 1) * stride + column + 1] ? 4 : 0)
-        | (geometry.wetCells[(row + 1) * stride + column] ? 8 : 0);
+        | (geometry.wetCells[row * stride + column + waterStep] ? 2 : 0)
+        | (geometry.wetCells[(row + waterStep) * stride + column + waterStep] ? 4 : 0)
+        | (geometry.wetCells[(row + waterStep) * stride + column] ? 8 : 0);
       if (!mask) continue;
       const top = midpoint(topLeft, topRight), right = midpoint(topRight, bottomRight), bottom = midpoint(bottomRight, bottomLeft), left = midpoint(bottomLeft, topLeft);
       const polygons: WaterVertex[][] = mask === 1 ? [[topLeft, top, left]]
@@ -840,14 +1011,15 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
       snow: { soil: [134, 135, 132], vegetation: [75, 102, 79], rock: [134, 141, 143], wet: [78, 111, 125] },
       urban: { soil: [118, 103, 82], vegetation: [91, 119, 70], rock: [139, 136, 127], wet: [66, 91, 91] },
     };
-    const palette = palettes[biome] ?? palettes.forest;
-    const brightness = .82 + macro * .3;
-    const roadPalette: [number, number, number] = terrainGeometry.biomeId === "urban" ? [108, 102, 91] : [119, 87, 53];
-    const channel = (index: 0 | 1 | 2) => (palette.soil[index] * weights.soil + palette.vegetation[index] * weights.vegetation + palette.rock[index] * weights.rock + palette.wet[index] * weights.wet + 226 * weights.snow + roadPalette[index] * weights.road) * (weights.road > .5 ? .92 + macro * .12 : brightness);
+    // RGB carries the SoilMachine surface section weights into the material:
+    // exposed bedrock, vegetated topsoil, and saturated/depositional ground.
+    // Alpha remains the independently painted road mask. The shader can now
+    // select matching albedo and normal layers instead of inferring every
+    // surface from slope and giving soil and grass the same plastic response.
     colors.push(
-      Math.round(Math.min(255, channel(0))),
-      Math.round(Math.min(255, channel(1))),
-      Math.round(Math.min(255, channel(2))),
+      Math.round(Math.min(1, Math.max(0, weights.rock)) * 255),
+      Math.round(Math.min(1, Math.max(0, weights.vegetation)) * 255),
+      Math.round(Math.min(1, Math.max(0, weights.wet + weights.snow * .55)) * 255),
       Math.round(weights.road * 255),
     );
   }
@@ -874,8 +1046,9 @@ const addProceduralGeometry = (runtime: RuntimeScene, parent: pc.Entity, mapEnti
   const mesh = new pc.Mesh(runtime.app.graphicsDevice);
   mesh.setPositions(positions); mesh.setNormals(normals); mesh.setUvs(0, uvs); mesh.setColors32(colors); mesh.setIndices(indices); mesh.update(pc.PRIMITIVE_TRIANGLES);
   const child = new pc.Entity(`${mapEntity.name} LOD ${lod}`);
-  const terrainMaterial = materialFor(runtime, "#ffffff", undefined, mapEntity.assetId.includes("stone") ? "stone-floor" : "grass", "printed-board", "world-terrain");
-  configureWorldTerrainMaterial(terrainMaterial, runtime.app.graphicsDevice);
+  const terrainBiome = terrainGeometry.biomeId ?? "forest";
+  const terrainMaterial = materialFor(runtime, "#ffffff", undefined, mapEntity.assetId.includes("stone") ? "stone-floor" : "grass", "printed-board", `world-terrain-${terrainBiome}`);
+  configureWorldTerrainMaterial(terrainMaterial, runtime.app.graphicsDevice, terrainBiome);
   child.addComponent("render", { meshInstances: [new pc.MeshInstance(mesh, terrainMaterial)], castShadows: true, receiveShadows: true });
   parent.tags.add(`world-lod:${lod}`);
   parent.addChild(child);
@@ -1142,7 +1315,7 @@ interface BasePlateSceneContext {
 }
 
 const addProceduralVegetation = (runtime: RuntimeScene, parent: pc.Entity, mapEntity: MapEntity): void => {
-  const lod = mapEntity.chunkId ? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
+  const lod = mapEntity.chunkId ? runtime.worldStreaming.residentLod(mapEntity.chunkId) ?? runtime.worldVisibility?.lodByChunkId.get(mapEntity.chunkId) ?? 0 : 0;
   const positions: number[] = [], colors: number[] = [], indices: number[] = [];
   const color = (hex: string, shade = 1): [number, number, number, number] => {
     const value = toColor(hex);
@@ -1253,9 +1426,11 @@ const resolveSceneBasePlate = (mapEntity: MapEntity, token: TokenAsset, context?
   return context.assets.find((asset) => asset.id === assetId);
 };
 
-const createMapObject = (runtime: RuntimeScene, mapEntity: MapEntity, tokenAssets: TokenAsset[], propAssets: PropAsset[] = [], materialAssets: MaterialAsset[] = [], parent = runtime.contentRoot, baseContext?: BasePlateSceneContext): pc.Entity => {
+const createMapObject = (runtime: RuntimeScene, mapEntity: MapEntity, tokenAssets: TokenAsset[], propAssets: PropAsset[] = [], materialAssets: MaterialAsset[] = [], parent = runtime.contentRoot, baseContext?: BasePlateSceneContext, sceneInterior = false): pc.Entity => {
   const root = new pc.Entity(mapEntity.name);
   root.tags.add("map-object", mapEntity.id);
+  if (sceneInterior) root.tags.add("scene:interior");
+  for (const tag of mapEntity.tags ?? []) root.tags.add(tag);
   const definition = ASSET_BY_ID.get(mapEntity.assetId);
   const token = tokenAssets.find((entry) => entry.id === mapEntity.assetId);
   const prop = propAssets.find((entry) => entry.id === mapEntity.assetId);
@@ -1276,7 +1451,9 @@ const createMapObject = (runtime: RuntimeScene, mapEntity: MapEntity, tokenAsset
     const baseAsset = resolveSceneBasePlate(mapEntity, token, baseContext);
     const miniatureRoot = new pc.Entity(`${token.name} miniature root`);
     root.addChild(miniatureRoot);
-    const baseHandle = renderBasePlate({ app: runtime.app, parent: root, token, asset: baseAsset, quality: callbacksQuality(runtime), reducedMotion: runtime.reducedMotion, propAssets, materialAssets });
+    let initialAnchor = 0;
+    const baseHandle = renderBasePlate({ app: runtime.app, parent: root, token, asset: baseAsset, quality: callbacksQuality(runtime), reducedMotion: runtime.reducedMotion, propAssets, materialAssets, onAnchorTopChanged: (height, offset) => miniatureRoot.setLocalPosition(offset.x, height - initialAnchor, offset.z) });
+    initialAnchor = baseHandle.anchorTop;
     runtime.basePlateHandles.set(mapEntity.id, baseHandle);
     root.tags.add(`baseplate:${baseAsset?.id ?? "legacy"}:${baseAsset?.updatedAt ?? token.base.color}`);
     void loadTokenModel(runtime, miniatureRoot, token, state, baseHandle.anchorTop);
@@ -1323,6 +1500,7 @@ const callbacksQuality = (runtime: RuntimeScene) => ((runtime.app.graphicsDevice
 
 const syncObjects = (runtime: RuntimeScene, map: GameMap, tokenAssets: TokenAsset[], propAssets: PropAsset[] = [], materialAssets: MaterialAsset[] = [], baseContext?: BasePlateSceneContext): void => {
   const expected = new Set(map.entities.map((entry) => entry.id));
+  const sceneInterior = isInteriorMap(map);
   for (const [id, root] of runtime.objectRoots) {
     if (!expected.has(id)) {
       root.destroy();
@@ -1347,6 +1525,13 @@ const syncObjects = (runtime: RuntimeScene, map: GameMap, tokenAssets: TokenAsse
     const definition = ASSET_BY_ID.get(mapEntity.assetId);
     const editorLightTag = definition?.editorOnly ? `editor-light:${JSON.stringify(mapEntity.light ?? definition.defaultBehavior)}` : "";
     const baseTag = token ? `baseplate:${desiredBase?.id ?? "legacy"}:${desiredBase?.updatedAt ?? token.base.color}` : "";
+    if (root && root.tags.has("scene:interior") !== sceneInterior) {
+      runtime.basePlateHandles.get(mapEntity.id)?.destroy();
+      runtime.basePlateHandles.delete(mapEntity.id);
+      root.destroy();
+      runtime.objectRoots.delete(mapEntity.id);
+      root = undefined;
+    }
     if (root && desiredState && (!root.tags.has(`token-state:${desiredState.id}`) || !root.tags.has(baseTag))) {
       runtime.basePlateHandles.get(mapEntity.id)?.destroy();
       runtime.basePlateHandles.delete(mapEntity.id);
@@ -1359,41 +1544,86 @@ const syncObjects = (runtime: RuntimeScene, map: GameMap, tokenAssets: TokenAsse
       runtime.objectRoots.delete(mapEntity.id);
       root = undefined;
     }
+    const surfaceTag = `world-surfaces:${JSON.stringify(mapEntity.materialSlots ?? {})}:${mapEntity.materialAssetId ?? ""}`;
+    if (root && mapEntity.worldGeometry && worldGeometrySources.get(root) !== mapEntity.worldGeometry) { root.destroy(); runtime.objectRoots.delete(mapEntity.id); root = undefined; }
+    if (root && !root.tags.has(surfaceTag)) { root.destroy(); runtime.objectRoots.delete(mapEntity.id); root = undefined; }
     const desiredLod = effectiveChunkId ? runtime.worldStreaming.residentLod(effectiveChunkId) ?? runtime.worldVisibility?.lodByChunkId.get(effectiveChunkId) ?? 0 : 0;
     if (root && mapEntity.worldGeometry && !root.tags.has(`world-lod:${desiredLod}`)) {
       root.destroy(); runtime.objectRoots.delete(mapEntity.id); root = undefined;
     }
-    if (!root && (!chunkVisible || !resident)) continue;
+    if (!root && !resident) continue;
+    if (!root && !chunkVisible && !effectiveChunkId) continue;
     if (!root) {
-      root = createMapObject(runtime, mapEntity, tokenAssets, propAssets, materialAssets, runtime.contentRoot, baseContext);
+      root = createMapObject(runtime, mapEntity, tokenAssets, propAssets, materialAssets, runtime.contentRoot, baseContext, sceneInterior);
       runtime.objectRoots.set(mapEntity.id, root);
+      worldGeometrySources.set(root, mapEntity.worldGeometry);
+      root.tags.add(surfaceTag);
+      for (const [role, materialId] of Object.entries(mapEntity.materialSlots ?? {})) {
+        const surface = materialAssets.find((asset) => asset.id === materialId);
+        if (!surface) continue;
+        for (const target of root.findByTag(`world-material:${role}`)) {
+          void applyMaterialAsset(runtime.app, target as pc.Entity, surface).catch(() => { if (!runtime.disposed) target.tags.add("missing-material-binary"); });
+        }
+      }
       if (mapEntity.build && Date.now() - Date.parse(mapEntity.build.placedAt) < 1_000) {
         runtime.placementAnimations.set(mapEntity.id, { startedAt: performance.now(), target: { ...mapEntity.scale } });
       }
     }
+    if (mapEntity.id === map.journey?.activeBuildingId) for (const roof of root.findByTag("world-material:roof")) roof.enabled = false;
     root.enabled = chunkVisible && !mapEntity.hidden && (!definition?.editorOnly || runtime.mode === "build");
     root.setPosition(mapEntity.position.x, mapEntity.position.y, mapEntity.position.z);
     root.setEulerAngles(mapEntity.rotation.x, mapEntity.rotation.y, mapEntity.rotation.z);
     root.setLocalScale(mapEntity.scale.x, mapEntity.scale.y, mapEntity.scale.z);
     const customMaterial = materialForGeometry(materialAssets.find((entry) => entry.id === mapEntity.materialAssetId), mapEntity.assetId);
-    if (customMaterial && !root.tags.has(`material:${customMaterial.id}:${customMaterial.updatedAt}`)) void applyMaterialAsset(runtime.app, root, customMaterial).then((loaded) => { if (loaded) root?.tags.add(`material:${customMaterial.id}:${customMaterial.updatedAt}`); });
+    if (customMaterial && !root.tags.has(`material:${customMaterial.id}:${customMaterial.updatedAt}`)) void applyMaterialAsset(runtime.app, root, customMaterial).then((loaded) => { if (loaded && !runtime.disposed && root.parent) root.tags.add(`material:${customMaterial.id}:${customMaterial.updatedAt}`); });
     applyLightProbeToEntity(runtime.lighting, root);
   }
   runtime.spatialHash = buildSpatialHash(map.entities, tokenAssets, propAssets);
   const contactShadowCount = map.entities.filter((entity) => tokenAssets.some((token) => token.id === entity.assetId) || ASSET_BY_ID.get(entity.assetId)?.id.startsWith("token-")).length;
   const canvas = runtime.app.graphicsDevice.canvas as HTMLCanvasElement;
   canvas.dataset.miniatureContactShadows = String(contactShadowCount);
+  canvas.dataset.sceneClassification = sceneInterior ? "interior-direct-forward" : "exterior-camera-frame";
   canvas.dataset.miniatureContactShadowPolicy = "soft-radial-floor-decal";
   canvas.dataset.miniatureRimLighting = "fresnel-painted-miniatures";
-  canvas.dataset.worldTerrainPipeline = map.world?.generatorRevision && map.world.generatorRevision >= 5 ? "warped-fbm+thermal-erosion+one-meter-terraces+catmull-road-deformation" : map.world?.generatorRevision && map.world.generatorRevision >= 4 ? "one-meter-rounded-terraces+painted-road-weight" : "legacy";
-  canvas.dataset.worldRoadRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "road-ribbon") ? "terrain-weightmap+feathered-spline-decal" : map.world ? "terrain-weightmap" : "none";
-  canvas.dataset.worldWaterRendering = map.entities.some((entity) => entity.tags?.includes("world:water")) ? "gerstner+dual-normal+depth-beer+screen-refraction+probe-reflection+shore-foam" : "none";
-  canvas.dataset.worldGrassRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "ground-cover") ? "dense-landscape-mask+crossed-card-instancing+player-reactive-vertex-wind" : "none";
-  canvas.dataset.worldFoliageRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "space-colonized-tree") ? "space-colonization+noise-poisson+lod" : map.entities.some((entity) => entity.tags?.includes("world:vegetation")) ? "procedural-branched-lod" : "none";
-  canvas.dataset.worldBuildingRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "cga-building") ? "cga-footprint+floors+facade-modules" : "none";
+  canvas.dataset.worldTerrainPipeline = map.world?.generatorRevision && map.world.generatorRevision >= 16 && map.generation?.blueprint.biome.id === "desert" ? "multi-band-seed+dune-initial-condition+particle-aeolian+mass-transport+localized-one-meter-tiers" : map.world?.generatorRevision && map.world.generatorRevision >= 16 ? "multi-band-seed+particle-hydraulic+thermal-settling+soil-layers+localized-one-meter-tiers" : map.world?.generatorRevision && map.world.generatorRevision >= 15 && map.generation?.blueprint.biome.id === "desert" ? "warped-fbm+particle-aeolian+deflation+abrasion+saltation+cascade+one-meter-terraces" : map.world?.generatorRevision && map.world.generatorRevision >= 14 ? "warped-fbm+particle-hydraulic+thermal-settling+soil-layers+one-meter-terraces" : map.world?.generatorRevision && map.world.generatorRevision >= 5 ? "warped-fbm+thermal-erosion+one-meter-terraces+catmull-road-deformation" : map.world?.generatorRevision && map.world.generatorRevision >= 4 ? "one-meter-rounded-terraces+painted-road-weight" : "legacy";
+  canvas.dataset.worldRoadRendering = map.world?.generatorRevision && map.world.generatorRevision >= 14 ? "grade-limited-spline+single-terrain-weightmap" : map.entities.some((entity) => entity.worldGeometry?.kind === "road-ribbon") ? "terrain-weightmap+feathered-spline-decal" : map.world ? "terrain-weightmap" : "none";
+  canvas.dataset.worldWaterRendering = map.entities.some((entity) => entity.tags?.includes("world:water")) ? "gerstner+dual-normal+depth-beer+probe-reflection+shore-foam" : "none";
+  canvas.dataset.worldGrassRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "ground-cover") ? "heightfield-root-locked+pbr-shadow-receiver+gpu-instanced-wind" : "none";
+  canvas.dataset.worldFoliageRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "space-colonized-tree") ? "space-colonization+separate-bark-leaf-pbr+animated-shadow-casters+lod" : map.entities.some((entity) => entity.assetId === "rock" && entity.tags?.includes("world:vegetation")) ? "biome-masked-rock-scatter" : map.entities.some((entity) => entity.tags?.includes("world:vegetation")) ? "procedural-branched-lod" : "none";
+  canvas.dataset.worldTerrainNormals = map.world ? map.generation?.blueprint.biome.id === "desert" ? "sand-ripple+rock+road-weighted-normal-maps" : "grass+dirt+rock+snow+road-weighted-normal-maps" : "none";
+  canvas.dataset.worldWaterTopology = map.entities.some((entity) => entity.worldGeometry?.kind === "water") ? "particle-discharge+momentum+shared-contour-surface" : "none";
+  canvas.dataset.worldBuildingRendering = map.entities.some((entity) => entity.worldGeometry?.kind === "assembly") ? "ai-construction-recipes+structural-frames+curved-roofs" : map.entities.some((entity) => entity.worldGeometry?.kind === "cga-building") ? "cga-footprint+floors+facade-modules" : "none";
   canvas.dataset.worldTerrainShadows = map.world ? "cast-and-receive" : "legacy";
-  canvas.dataset.worldVegetationWind = map.entities.some((entity) => entity.tags?.includes("world:vegetation")) ? "pbr-vertex-wind+player-bend+animated-shadow" : "none";
+  canvas.dataset.worldVegetationWind = map.entities.some((entity) => entity.worldGeometry?.kind === "space-colonized-tree" || entity.worldGeometry?.kind === "ground-cover") ? "pbr-vertex-wind+player-bend+animated-shadow" : "none";
   canvas.dataset.worldBridgeCount = String(map.entities.filter((entity) => entity.tags?.includes("world:bridge")).length);
+  const renderedRoots = [...runtime.objectRoots.values()].filter((root) => root.enabled);
+  const terrainRoots = map.entities
+    .filter((entity) => entity.worldGeometry?.kind === "terrain")
+    .map((entity) => runtime.objectRoots.get(entity.id))
+    .filter((root): root is pc.Entity => Boolean(root));
+  const renderComponents = renderedRoots.flatMap((root) => root.findComponents("render") as pc.RenderComponent[]);
+  const meshInstances = renderComponents.flatMap((component) => component.meshInstances ?? []);
+  const finiteBounds = meshInstances.map((instance) => instance.aabb).filter((bounds) => {
+    const center = bounds.center, half = bounds.halfExtents;
+    return [center.x, center.y, center.z, half.x, half.y, half.z].every(Number.isFinite);
+  });
+  if (finiteBounds.length) {
+    const minX = Math.min(...finiteBounds.map((bounds) => bounds.center.x - bounds.halfExtents.x));
+    const minY = Math.min(...finiteBounds.map((bounds) => bounds.center.y - bounds.halfExtents.y));
+    const minZ = Math.min(...finiteBounds.map((bounds) => bounds.center.z - bounds.halfExtents.z));
+    const maxX = Math.max(...finiteBounds.map((bounds) => bounds.center.x + bounds.halfExtents.x));
+    const maxY = Math.max(...finiteBounds.map((bounds) => bounds.center.y + bounds.halfExtents.y));
+    const maxZ = Math.max(...finiteBounds.map((bounds) => bounds.center.z + bounds.halfExtents.z));
+    canvas.dataset.worldRenderBounds = [minX, minY, minZ, maxX, maxY, maxZ].map((value) => value.toFixed(2)).join(",");
+  } else canvas.dataset.worldRenderBounds = "none";
+  canvas.dataset.worldObjectRoots = String(runtime.objectRoots.size);
+  canvas.dataset.worldEnabledRoots = String(renderedRoots.length);
+  canvas.dataset.worldTerrainRoots = String(terrainRoots.length);
+  canvas.dataset.worldRenderComponents = String(renderComponents.length);
+  canvas.dataset.worldMeshInstances = String(meshInstances.length);
+  canvas.dataset.worldFiniteBounds = String(finiteBounds.length);
+  const cameraPosition = runtime.camera.getPosition();
+  canvas.dataset.worldCamera = [cameraPosition.x, cameraPosition.y, cameraPosition.z, runtime.orbit.target.x, runtime.orbit.target.y, runtime.orbit.target.z].map((value) => value.toFixed(2)).join(",");
   canvas.dataset.customMaterialProjections = map.entities.flatMap((entity) => {
     const material = materialAssets.find((entry) => entry.id === entity.materialAssetId);
     return material ? [`${entity.assetId}:${materialProjectionForGeometry(entity.assetId, material.projection)}`] : [];
@@ -1410,7 +1640,7 @@ const refreshWorldVisibility = (runtime: RuntimeScene, map: GameMap, selectedEnt
   }
   const selected = selectedEntityId ? map.entities.find((entry) => entry.id === selectedEntityId)?.chunkId : undefined;
   const selectedChunkIds = new Set(selected ? [selected] : []);
-  const interior = ["interior", "dungeon"].includes(map.generation?.blueprint.kind ?? "")
+  const interior = isInteriorMap(map)
     ? chunkIdForPosition(map.world, { x: runtime.orbit.target.x, y: runtime.orbit.target.y, z: runtime.orbit.target.z })
     : undefined;
   const next = computeWorldVisibility({
@@ -1420,7 +1650,7 @@ const refreshWorldVisibility = (runtime: RuntimeScene, map: GameMap, selectedEnt
     quality: callbacksQuality(runtime), interiorChunkId: interior, selectedChunkIds, overview: runtime.worldOverview,
     verticalFovDegrees: runtime.camera.camera?.fov ?? 52,
     aspectRatio: Math.max(.25, runtime.app.graphicsDevice.width / Math.max(1, runtime.app.graphicsDevice.height)),
-    farClip: runtime.camera.camera?.farClip ?? 250,
+    farClip: Math.min(runtime.camera.camera?.farClip ?? 250, map.world.chunkSize * 12),
   });
   const signature = [...next.visibleChunkIds].sort().map((id) => `${id}:${next.lodByChunkId.get(id) ?? 2}`).join(",");
   const changed = signature !== runtime.worldVisibilitySignature;
@@ -2180,6 +2410,8 @@ const updateCamera = (runtime: RuntimeScene): void => {
     target.y + Math.sin(pitchRadians) * distance,
     target.z + Math.cos(yawRadians) * horizontal,
   );
+  const proposed = runtime.camera.getPosition();
+  runtime.camera.setPosition(proposed.x, Math.max(proposed.y, (worldHeight(runtime.app, proposed.x, proposed.z) ?? runtime.terrainHeight(proposed.x, proposed.z)) + 1.6), proposed.z);
   runtime.camera.lookAt(target);
   const cameraPosition = runtime.camera.getPosition();
   runtime.gridMaterial?.setParameter("uCameraPosition", [cameraPosition.x, cameraPosition.y, cameraPosition.z]);
@@ -2228,7 +2460,7 @@ const screenRay = (runtime: RuntimeScene, canvas: HTMLCanvasElement, clientX: nu
   return { origin: { x: near.x, y: near.y, z: near.z }, direction: { x: direction.x, y: direction.y, z: direction.z } };
 };
 
-export function SceneViewport({ map, tokenAssets, propAssets = [], materialAssets = [], basePlateAssets = [], campaignBasePlateAssignments, sceneBasePlateAssignments, tokenCharacterLinks, selectedEntityId, activeAssetId, showGrid, onPlace, onSelect, onPipette, environmentPanorama = null, diceThemes = [], diceThemeAssignments = {}, mode = "build", focusAssetId = null, worldOverview = false }: SceneViewportProps) {
+function PlayCanvasSceneViewport({ map, tokenAssets, propAssets = [], materialAssets = [], basePlateAssets = [], campaignBasePlateAssignments, sceneBasePlateAssignments, tokenCharacterLinks, selectedEntityId, activeAssetId, showGrid, onPlace, onSelect, onPipette, environmentPanorama = null, diceThemes = [], diceThemeAssignments = {}, mode = "build", focusAssetId = null, worldOverview = false }: SceneViewportProps) {
   const displaySettings = useDisplaySettings();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
@@ -2306,8 +2538,6 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     canvas.dataset.graphicsBackend = app.graphicsDevice.isWebGPU ? "webgpu" : "webgl2";
     canvas.dataset.worldCompute = worldCompute.backend;
     const worldWaterMaterial = createFlowingWaterMaterial(app.graphicsDevice);
-    const volumetricClouds = camera.camera ? new VolumetricCloudEffect(app.graphicsDevice, camera) : null;
-    volumetricClouds?.setCoverage(cloudCoverageForMap(callbacksRef.current.map));
     const runtime: RuntimeScene = {
       disposed: false,
       app,
@@ -2355,6 +2585,7 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       diceTotalRevealed: false,
       onDiceSum: setDiceSumPresentation,
       mapBounds: { width: callbacksRef.current.map.width, depth: callbacksRef.current.map.depth },
+      terrainHeight: (x, z) => mapHeight(callbacksRef.current.map, x, z),
       diceTaaSuspended: false,
       reducedMotion: resolvedMotionReduction(displaySettings),
       orbit: { yaw: 38, pitch: 52, distance: Math.max(25, Math.max(callbacksRef.current.map.width, callbacksRef.current.map.depth) * 1.05), target: new pc.Vec3(0, 0, 0) },
@@ -2365,7 +2596,8 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       lastWorldVisibilityAt: 0,
       worldStreaming: new WorldChunkStreamingController(),
       worldOverview: callbacksRef.current.worldOverview,
-      volumetricClouds,
+      volumetricClouds: null,
+      cloudsAttached: false,
       worldCompute,
     };
     runtime.animatedMaterials.add(worldWaterMaterial);
@@ -2384,9 +2616,9 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     rebuildGrid(runtime, callbacksRef.current.map, showGrid);
     rebuildFogOfWar(runtime, callbacksRef.current.map, callbacksRef.current.tokenAssets);
     rebuildGhost(runtime, callbacksRef.current.activeAssetId, callbacksRef.current.tokenAssets, callbacksRef.current.propAssets);
+    let revealMapId = "", reveal = new WorldReveal();
     const updateScene = (dt: number) => {
       if (runtime.disposed) return;
-      if (camera.camera) runtime.worldCompute.dispatch(camera.camera);
       for (const base of runtime.basePlateHandles.values()) base.update(dt);
       const ghostState = ghostStateRef.current;
       if (runtime.ghost && ghostState.target) {
@@ -2410,11 +2642,22 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
           void syncScenery(runtime, callbacksRef.current.map).then(setSplatIssue).catch((error) => setSplatIssue(error instanceof Error ? error.message : "Splat tile streaming failed"));
         }
       }
-      if (runtime.worldStreaming.takeUploads(1, 4).length) {
+      const uploadedChunks = runtime.worldStreaming.takeUploads(1, 4, () => performance.now(), () => {
         syncObjects(runtime, callbacksRef.current.map, callbacksRef.current.tokenAssets, callbacksRef.current.propAssets, callbacksRef.current.materialAssets, { assets: callbacksRef.current.basePlateAssets, campaignAssignments: callbacksRef.current.campaignBasePlateAssignments, sceneAssignments: callbacksRef.current.sceneBasePlateAssignments, tokenCharacterLinks: callbacksRef.current.tokenCharacterLinks });
+      });
+      if (uploadedChunks.length) {
+        const uploadedMapId = callbacksRef.current.map.id;
+        runtime.app.once("frameend", () => { if (!runtime.disposed && callbacksRef.current.map.id === uploadedMapId) runtime.worldStreaming.markPresented(uploadedChunks); });
         (runtime.app.graphicsDevice.canvas as HTMLCanvasElement).dataset.residentWorldChunks = String(runtime.worldStreaming.snapshot().filter((entry) => entry.resident).length);
       }
       const seconds = now / 1000;
+      const atmosphereMap = callbacksRef.current.map;
+      if (revealMapId !== atmosphereMap.id) { revealMapId = atmosphereMap.id; reveal = new WorldReveal(); }
+      const revealCamera=runtime.orbit.target;
+      if(Math.abs(revealCamera.x)>atmosphereMap.width/2+32 || Math.abs(revealCamera.z)>atmosphereMap.depth/2+32) reveal.follow(revealCamera.x,revealCamera.z);
+      const radius = atmosphereMap.world ? reveal.update(dt, atmosphereMap.world, id => runtime.worldStreaming.isPresented(id), horizonReady(runtime.app)) : 60000;
+      updateWorldAtmosphere(runtime.app, runtime.camera, runtime.lighting.key, seconds, radius, Boolean(atmosphereMap.world) && !isInteriorMap(atmosphereMap), atmosphereMap.weather, reveal.center);
+      (runtime.app.graphicsDevice.canvas as HTMLCanvasElement).dataset.worldRevealRadius = radius.toFixed(1);
       runtime.volumetricClouds?.setTime(seconds);
       for (const lightEntity of runtime.contentRoot.findByTag("prop-practical-light") as pc.Entity[]) {
         const base = Number(lightEntity.tags.list().find((tag) => tag.startsWith("light-base:"))?.split(":")[1] ?? 1);
@@ -2456,8 +2699,9 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       updateFogOfWarMask(runtime, callbacksRef.current.map, callbacksRef.current.tokenAssets);
       runtime.selectionMaterial?.setParameter("uTime", seconds);
       const grassTarget = callbacksRef.current.mode === "play" && playerAnchor ? [playerAnchor.position.x, playerAnchor.position.y, playerAnchor.position.z] : [100000, 100000, 100000];
-      for (const material of runtime.grassMaterials.values()) material.setParameter("uPlayerPosition", grassTarget);
-      for (const material of runtime.animatedMaterials) material.setParameter("uTime", seconds);
+      for (const material of runtime.grassMaterials.values()) { material.setParameter("uPlayerPosition", grassTarget); const view = runtime.camera.getPosition(); material.setParameter("uGrassViewPosition", [view.x, view.y, view.z]); }
+      const wind = weatherSurfaceState(resolveWorldWeather(atmosphereMap.weather));
+      for (const material of runtime.animatedMaterials) { material.setParameter("uTime", seconds); material.setParameter("uWorldWind", [wind.windX / 3, wind.windZ / 3]); }
       const renderCanvas = runtime.app.graphicsDevice.canvas as HTMLCanvasElement;
       renderCanvas.dataset.animatedShaderTime = seconds.toFixed(2);
       renderCanvas.dataset.animatedShaderCount = String(runtime.animatedMaterials.size);
@@ -2636,10 +2880,6 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       if (runtime.diceTaaSuspended && runtime.diceThrows.every((die) => die.settledAt !== null)) setDiceTaaSuspended(runtime, false);
       (runtime.app.graphicsDevice.canvas as HTMLCanvasElement).dataset.diceThrows = String(runtime.diceThrows.length);
     };
-    app.on("update", updateScene);
-    app.start();
-    setReady(true);
-
     const canvasHost = canvas.parentElement ?? canvas;
     const resizeToHost = () => {
       const bounds = canvasHost.getBoundingClientRect();
@@ -2648,10 +2888,21 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     const resizeObserver = new ResizeObserver(resizeToHost);
     resizeObserver.observe(canvasHost);
     resizeToHost();
+    const dispatchWorldCompute = () => {
+      if (!runtime.disposed && camera.camera) runtime.worldCompute.dispatch(camera.camera);
+    };
+    app.on("update", updateScene);
+    // Submit compute before PlayCanvas opens the frame's SceneColor render
+    // encoder. `prerender` fires once per render pass, including while
+    // CameraFrame owns an active encoder; dispatching there invalidates the
+    // parent render pass on WebGPU and can leave generated interiors black.
+    app.on("update", dispatchWorldCompute);
+    app.start();
+    setReady(true);
     // Post-effect targets inherit the current canvas dimensions when they are
     // allocated. Attach after the first host resize so the compositor never
     // captures into the canvas's zero/placeholder startup target.
-    if (volumetricClouds && camera.camera) camera.camera.postEffects.addEffect(volumetricClouds);
+    syncVolumetricClouds(runtime, callbacksRef.current.map);
 
     let pointerStart: { x: number; y: number } | null = null;
     let lastPointer: { x: number; y: number } | null = null;
@@ -2803,7 +3054,7 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       const dy = event.clientY - lastPointer.y;
       if (orbiting) {
         runtime.orbit.yaw -= dx * 0.35;
-        runtime.orbit.pitch = pc.math.clamp(runtime.orbit.pitch + dy * 0.28, 22, 82);
+        runtime.orbit.pitch = pc.math.clamp(runtime.orbit.pitch + dy * 0.28, callbacksRef.current.map.world ? 2 : 22, 82);
         updateCamera(runtime);
       } else if (panning) {
         const scale = runtime.orbit.distance * 0.0025;
@@ -2863,7 +3114,7 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
         }
         return;
       }
-      runtime.orbit.distance = pc.math.clamp(runtime.orbit.distance * (1 + event.deltaY * 0.001), 6, 90);
+      runtime.orbit.distance = pc.math.clamp(runtime.orbit.distance * (1 + event.deltaY * 0.001), 2, Math.max(90, callbacksRef.current.map.width * 1.6));
       updateCamera(runtime);
     };
     const pointerLeave = () => { if (runtime.ghost) runtime.ghost.enabled = false; };
@@ -2894,9 +3145,13 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     window.addEventListener("dndrom:rotate-ghost", rotateGhost);
     window.addEventListener("dndrom:dice-roll", diceRoll);
 
+    let teardownStarted = false;
     teardown = () => {
+      if (teardownStarted) return;
+      teardownStarted = true;
       runtime.disposed = true;
       app.off("update", updateScene);
+      app.off("update", dispatchWorldCompute);
       runtime.diceThrowGeneration += 1;
       resizeObserver.disconnect();
       canvas.removeEventListener("pointerdown", pointerDown);
@@ -2908,30 +3163,35 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       window.removeEventListener("dndrom:rotate-ghost", rotateGhost);
       window.removeEventListener("dndrom:dice-roll", diceRoll);
       window.removeEventListener(LOCAL_AI_SETTINGS_EVENT, applyWorldSplatBudget);
-      destroyLightingRig(runtime.lighting);
-      if (runtime.volumetricClouds && camera.camera) camera.camera.postEffects.removeEffect(runtime.volumetricClouds);
-      runtime.volumetricClouds?.destroy();
-      runtime.worldCompute.destroy();
-      runtime.gridMaterial?.destroy();
-      runtime.fogTexture?.destroy();
-      runtime.fogMaterial?.destroy();
-      runtime.selectionMaterial?.destroy();
-      runtime.blobShadowMaterial.destroy();
-      for (const base of runtime.basePlateHandles.values()) base.destroy();
-      runtime.basePlateHandles.clear();
-      for (const material of runtime.animatedMaterials) material.destroy();
-      for (const die of runtime.diceThrows) disposeDieThrow(die);
-      for (const impact of runtime.diceImpacts) {
-        impact.ring.destroy();
-        impact.sparks.forEach((spark) => spark.destroy());
-        impact.particleBurst?.destroy();
-        impact.material.destroy();
-      }
-      for (const maps of runtime.surfaceMaps.values()) Object.values(maps).forEach((texture) => texture.destroy());
-      app.destroy();
-      releaseSharedPlayCanvas(canvasElementHost, canvas);
       canvasRef.current = null;
       runtimeRef.current = null;
+      // PlayCanvas can defer destruction when navigation lands during its frame
+      // update. Dispose dependent GPU resources from its destroy event so they
+      // cannot be invalidated while the current command buffer is still built.
+      app.once("destroy", () => {
+        destroyLightingRig(runtime.lighting);
+        if (runtime.volumetricClouds && runtime.cloudsAttached && camera.camera) camera.camera.postEffects.removeEffect(runtime.volumetricClouds);
+        runtime.volumetricClouds?.destroy();
+        runtime.worldCompute.destroy();
+        runtime.gridMaterial?.destroy();
+        runtime.fogTexture?.destroy();
+        runtime.fogMaterial?.destroy();
+        runtime.selectionMaterial?.destroy();
+        runtime.blobShadowMaterial.destroy();
+        for (const base of runtime.basePlateHandles.values()) base.destroy();
+        runtime.basePlateHandles.clear();
+        for (const material of runtime.animatedMaterials) material.destroy();
+        for (const die of runtime.diceThrows) disposeDieThrow(die);
+        for (const impact of runtime.diceImpacts) {
+          impact.ring.destroy();
+          impact.sparks.forEach((spark) => spark.destroy());
+          impact.particleBurst?.destroy();
+          impact.material.destroy();
+        }
+        for (const maps of runtime.surfaceMaps.values()) Object.values(maps).forEach((texture) => texture.destroy());
+        releaseSharedPlayCanvas(canvasElementHost, canvas);
+      });
+      if (app.graphicsDevice) app.destroy();
     };
     })().catch((error: unknown) => {
       if (cancelled) return;
@@ -2948,8 +3208,9 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     const runtime = runtimeRef.current;
     if (runtime) {
       runtime.mapBounds = { width: map.width, depth: map.depth };
-      runtime.volumetricClouds?.setCoverage(cloudCoverageForMap(map));
-      (runtime.app.graphicsDevice.canvas as HTMLCanvasElement).dataset.worldCloudRendering = cloudCoverageForMap(map) > 0 ? "fullscreen-perlin-worley-raymarch+beer-lighting" : "disabled";
+      applyLightingRig(runtime.lighting, map);
+      syncVolumetricClouds(runtime, map);
+      syncWorldLandscape(runtime,map);
       (runtime.app.graphicsDevice.canvas as HTMLCanvasElement).dataset.lightingQuality = map.lighting?.quality ?? "balanced";
       runtime.orbit.target.set(0, 0, 0);
       runtime.orbit.distance = Math.max(25, Math.max(map.width, map.depth) * 1.05);
@@ -2959,12 +3220,24 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       runtime.worldStreaming.reset();
       refreshWorldVisibility(runtime, map, selectedEntityId);
       syncObjects(runtime, map, tokenAssets, propAssets, materialAssets, { assets: basePlateAssets, campaignAssignments: campaignBasePlateAssignments, sceneAssignments: sceneBasePlateAssignments, tokenCharacterLinks });
-      applyLightingRig(runtime.lighting, map);
       rebuildEnvironment(runtime.lighting, map, environmentPanorama);
       rebuildDynamicLights(runtime.lighting, map);
       rebuildFogOfWar(runtime, map, tokenAssets);
     }
   }, [map.id]);
+
+  useEffect(() => {
+    const focus = (event: Event) => {
+      const runtime = runtimeRef.current, id = (event as CustomEvent<{ entityId: string }>).detail?.entityId;
+      const entity = callbacksRef.current.map.entities.find(entity => entity.id === id);
+      if (!runtime || !entity) return;
+      const access = buildingAccess(entity), target = access?.anchor ?? entity.position;
+      runtime.orbit.target.set(target.x, target.y + 1, target.z);
+      runtime.orbit.distance = 14; runtime.orbit.pitch = 48; updateCamera(runtime);
+    };
+    window.addEventListener("dndrom:focus-building", focus);
+    return () => window.removeEventListener("dndrom:focus-building", focus);
+  }, []);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -2973,10 +3246,16 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
       refreshWorldVisibility(runtime, map, selectedEntityId);
       syncObjects(runtime, map, tokenAssets, propAssets, materialAssets, { assets: basePlateAssets, campaignAssignments: campaignBasePlateAssignments, sceneAssignments: sceneBasePlateAssignments, tokenCharacterLinks });
       applyLightingRig(runtime.lighting, map);
+      syncVolumetricClouds(runtime, map);
+      syncWorldLandscape(runtime,map);
       rebuildDynamicLights(runtime.lighting, map);
       rebuildFogOfWar(runtime, map, tokenAssets);
     }
-  }, [map.entities, map.ambientColor, map.lighting, tokenAssets, propAssets, materialAssets, basePlateAssets, campaignBasePlateAssignments, sceneBasePlateAssignments, tokenCharacterLinks]);
+    if (runtime) for (const entity of map.entities) {
+      const root = runtime.objectRoots.get(entity.id);
+      if (root) for (const roof of root.findByTag("world-material:roof")) roof.enabled = entity.id !== map.journey?.activeBuildingId;
+    }
+  }, [map.journey?.activeBuildingId, map.entities, map.ambientColor, map.lighting, tokenAssets, propAssets, materialAssets, basePlateAssets, campaignBasePlateAssignments, sceneBasePlateAssignments, tokenCharacterLinks]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -2993,6 +3272,8 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     if (!runtime) return;
     runtime.reducedMotion = resolvedMotionReduction(displaySettings);
     applyLightingRig(runtime.lighting, map, displaySettings);
+    syncVolumetricClouds(runtime, map);
+      syncWorldLandscape(runtime,map);
     rebuildEnvironment(runtime.lighting, map, environmentPanorama, displaySettings);
     rebuildDynamicLights(runtime.lighting, map, displaySettings);
     const canvas = runtime.app.graphicsDevice.canvas as HTMLCanvasElement;
@@ -3078,3 +3359,5 @@ export function SceneViewport({ map, tokenAssets, propAssets = [], materialAsset
     </div>
   );
 }
+
+export function SceneViewport(props: SceneViewportProps) { return isUnreal() ? <NativeSceneViewport {...props} /> : <PlayCanvasSceneViewport {...props} />; }

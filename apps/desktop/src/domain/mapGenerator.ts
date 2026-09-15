@@ -54,6 +54,11 @@ const floorGrid = (assetId: string, width: number, depth: number): MapEntity[] =
 
 const broadGround = (assetId: string, width: number, depth: number): MapEntity => stretchedEntity(assetId, "Terrain", 0, 0, { x: width / 2, y: 1, z: depth / 2 });
 
+const tagInteriorShell = (entities: MapEntity[]): MapEntity[] => entities.map((entry) => ({
+  ...entry,
+  tags: [...new Set([...(entry.tags ?? []), "world:interior", /^(floor-)/.test(entry.assetId) ? "world:floor" : /^(wall-)/.test(entry.assetId) ? "world:wall" : "world:interior-prop"])],
+}));
+
 export const yawToward = (from: Pick<Vec3, "x" | "z">, target: Pick<Vec3, "x" | "z">): number => Math.atan2(target.x - from.x, target.z - from.z) * 180 / Math.PI;
 
 const chairAt = (table: Pick<Vec3, "x" | "z">, offsetX: number, offsetZ: number): MapEntity => {
@@ -92,7 +97,8 @@ function generateTavern(prompt: string, random: () => number, location?: WorldLo
   for (const position of [{ x: -2.5, z: -1.8 }, { x: 2.7, z: -1.6 }, { x: -1, z: 3.4 }, { x: 4.6, z: 3.7 }]) {
     entities.push(entity("table-round", "Tavern table", position.x, position.z, random() * 30), chairAt(position, 1.25, 0), chairAt(position, -1.25, 0));
   }
-  return makeMap(location?.name ?? "The Lantern & Thorn", "tavern", width, depth, "#30271f", entities, prompt, location, attachPoiMarkers(entities, location?.pointOfInterests, width, depth, random));
+  const pointsOfInterest = attachPoiMarkers(entities, location?.pointOfInterests, width, depth, random);
+  return makeMap(location?.name ?? "The Lantern & Thorn", "tavern", width, depth, "#30271f", tagInteriorShell(entities), prompt, location, pointsOfInterest);
 }
 
 function generateSettlement(prompt: string, theme: "city" | "town" | "village", random: () => number, location?: WorldLocation): GameMap {
@@ -148,7 +154,7 @@ function generateDungeon(prompt: string, random: () => number, theme: "dungeon" 
   if (theme === "cavern") for (let index = 0; index < 18; index += 1) entities.push(entity("rock", "Cavern rock", (random() - 0.5) * 17, (random() - 0.5) * 14, random() * 360, 0.55 + random()));
   entities.push(theme === "ruins" ? entity("token-monster", "Ruins guardian", 0, 6.5, 180) : entity("token-orc", "Dungeon guard", 2.5, 4.8, 180));
   const pointsOfInterest = attachPoiMarkers(entities, location?.pointOfInterests, width, depth, random);
-  return makeMap(location?.name ?? (theme === "cavern" ? "Echoing Cavern" : theme === "ruins" ? "Sunken Shrine" : "Ashen Vault"), theme, width, depth, theme === "cavern" ? "#242a2d" : "#282624", entities, prompt, location, pointsOfInterest);
+  return makeMap(location?.name ?? (theme === "cavern" ? "Echoing Cavern" : theme === "ruins" ? "Sunken Shrine" : "Ashen Vault"), theme, width, depth, theme === "cavern" ? "#242a2d" : "#282624", tagInteriorShell(entities), prompt, location, pointsOfInterest);
 }
 
 function makeMap(name: string, theme: MapTheme, width: number, depth: number, ambientColor: string, entities: MapEntity[], prompt: string, location?: WorldLocation, pointsOfInterest?: PointOfInterest[]): GameMap {

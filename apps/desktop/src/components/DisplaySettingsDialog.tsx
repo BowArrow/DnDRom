@@ -41,7 +41,7 @@ export function DisplaySettingsDialog({ open, onClose }: DisplaySettingsDialogPr
   useEffect(() => {
     if (open) {
       setDraft(saved); setProvider(campaignSettings.propImageProvider ?? "sana-local"); setLicenseAccepted(Boolean(campaignSettings.kreaCommunityLicenseAcceptedAt)); setKreaToken(""); setAiMemoryProfile(readLocalAiSettings().memoryProfile);
-      if ("__TAURI_INTERNALS__" in window) void import("@tauri-apps/api/core").then(({ invoke }) => invoke<boolean>("has_krea_api_token")).then(setTokenSaved).catch(() => setTokenSaved(false));
+      if ("__TAURI_INTERNALS__" in window) void import("../platform/desktop").then(({ invoke }) => invoke<boolean>("has_krea_api_token")).then(setTokenSaved).catch(() => setTokenSaved(false));
     }
   }, [open, saved, campaignSettings]);
 
@@ -69,7 +69,7 @@ export function DisplaySettingsDialog({ open, onClose }: DisplaySettingsDialogPr
   };
   const saveToken = async () => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    const { invoke } = await import("@tauri-apps/api/core");
+    const { invoke } = await import("../platform/desktop");
     await invoke("set_krea_api_token", { token: kreaToken }); setKreaToken(""); setTokenSaved(Boolean(kreaToken.trim()));
   };
 

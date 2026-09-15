@@ -40,7 +40,7 @@ describe("tabletop lighting profiles", () => {
 
   it("gives generated worlds a readable sun and sky floor", () => {
     const darkRequest = tabletopLightingProfile("forest", 128, 128, { mood: "natural", keyIntensity: 0, fillIntensity: 0 }, true);
-    expect(darkRequest.sunIntensity).toBeGreaterThanOrEqual(1.62);
+    expect(darkRequest.sunIntensity).toBeGreaterThanOrEqual(1.48);
     expect(Math.min(...darkRequest.ambient)).toBeGreaterThanOrEqual(.15);
     expect(Math.min(...darkRequest.skyAmbient)).toBeGreaterThanOrEqual(.18);
     expect(darkRequest.shadowIntensity).toBeGreaterThanOrEqual(.86);

@@ -1,5 +1,8 @@
+import { resolveWorldWeather, type WorldWeather } from "../domain/worldWeather";
+import {recordSharedEntityEdit,refreshSharedMap} from '../domain/sharedWorldPersistence';
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { browserCampaignStorage, reportCampaignPersistenceError } from "../persistence/campaignStorage";
 import { applyDamage, applyHealing } from "../domain/rules";
 import { longRest, resolveTypedDamage, shortRest } from "../domain/srdRules";
 import { createDefaultCharacter, createStarterCampaign } from "../domain/seed";
@@ -58,6 +61,7 @@ interface CampaignStore {
   removeEntity: (id: string) => void;
   addScenery: (scenery: SplatScenery) => void;
   removeScenery: (id: string) => void;
+  updateMapWeather: (update: Partial<WorldWeather>) => void;
   updateMapLighting: (update: Partial<NonNullable<GameMap["lighting"]>>) => void;
   updateMapGridShape: (shape: NonNullable<GameMap["gridShape"]>) => void;
   addTokenAsset: (asset: TokenAsset) => void;
@@ -88,6 +92,7 @@ interface CampaignStore {
   removeDiceTheme: (id: string) => void;
   assignDiceTheme: (sides: DiceSides, themeId: string | null) => void;
   replaceMap: (map: GameMap, summary?: string) => void;
+  commitSharedWorld: (world: WorldPlan, map: GameMap) => void;
   installGeneratedCampaign: (plan: CampaignPlan, world: WorldPlan, map: GameMap) => void;
   travelToLocation: (locationId: string, map: GameMap) => void;
   renameCampaign: (name: string) => void;
@@ -175,18 +180,20 @@ export const useCampaignStore = create<CampaignStore>()(
       setActiveAsset: (activeAssetId) => set({ activeAssetId, selectedEntityId: null }),
 
       addEntity: (entity) => {
-        set((state) => ({ campaign: touchCampaign({ ...state.campaign, map: { ...state.campaign.map, entities: [...state.campaign.map.entities, entity] } }), selectedEntityId: entity.id }));
+        set((state) => ({ campaign: touchCampaign(recordSharedEntityEdit({ ...state.campaign, map: { ...state.campaign.map, entities: [...state.campaign.map.entities, entity] } },entity.id,entity)), selectedEntityId: entity.id }));
         get().addEvent("map.entity_added", `Placed ${entity.name}`, { entityId: entity.id, assetId: entity.assetId });
       },
-      updateEntity: (id, update) => set((state) => ({
-        campaign: touchCampaign({ ...state.campaign, map: { ...state.campaign.map, entities: updateAttachmentHierarchy(state.campaign.map.entities, id, update) } }),
-      })),
+      updateEntity: (id, update) => set((state) => {
+        const entities=updateAttachmentHierarchy(state.campaign.map.entities,id,update);let campaign={...state.campaign,map:{...state.campaign.map,entities}};
+        for(let i=0;i<entities.length;i++)if(entities[i]!==state.campaign.map.entities[i])campaign=recordSharedEntityEdit(campaign,entities[i].id,entities[i]);
+        return {campaign:touchCampaign(campaign)};
+      }),
       removeEntity: (id) => {
         const target = get().campaign.map.entities.find((entry) => entry.id === id);
         const dependents = structuralDescendants(get().campaign.map.entities, id);
         const removedIds = new Set([id, ...dependents]);
         const refundEligible = Boolean(target?.build && Date.now() <= Date.parse(target.build.refundableUntil));
-        set((state) => ({ campaign: touchCampaign({ ...state.campaign, map: { ...state.campaign.map, entities: state.campaign.map.entities.filter((entity) => !removedIds.has(entity.id)) } }), selectedEntityId: state.selectedEntityId && removedIds.has(state.selectedEntityId) ? null : state.selectedEntityId }));
+        set((state) => {let campaign=state.campaign;for(const removedId of removedIds)campaign=recordSharedEntityEdit(campaign,removedId);return { campaign: touchCampaign({ ...campaign, map: { ...campaign.map, entities: campaign.map.entities.filter((entity) => !removedIds.has(entity.id)) } }), selectedEntityId: state.selectedEntityId && removedIds.has(state.selectedEntityId) ? null : state.selectedEntityId };});
         if (target) get().addEvent("map.entity_removed", `Removed ${target.name}${dependents.length ? ` and collapsed ${dependents.length} unsupported piece${dependents.length === 1 ? "" : "s"}` : ""}${refundEligible ? " with a full build refund" : ""}`, { entityId: id, refundEligible, structuralDependents: dependents });
       },
       addScenery: (scenery) => {
@@ -198,6 +205,7 @@ export const useCampaignStore = create<CampaignStore>()(
         set((state) => ({ campaign: touchCampaign({ ...state.campaign, map: { ...state.campaign.map, scenery: (state.campaign.map.scenery ?? []).filter((entry) => entry.id !== id) } }) }));
         if (target) get().addEvent("map.scenery_removed", `Removed ${target.name} from this map`, { sceneryId: id, storageKey: target.storageKey });
       },
+      updateMapWeather: (update) => set((state) => ({ campaign: touchCampaign({ ...state.campaign, map: { ...state.campaign.map, weather: resolveWorldWeather({ ...state.campaign.map.weather, ...update }) } }) })),
       updateMapLighting: (update) => set((state) => ({
         campaign: touchCampaign({
           ...state.campaign,
@@ -436,6 +444,9 @@ export const useCampaignStore = create<CampaignStore>()(
         set((state) => ({ campaign: touchCampaign({ ...state.campaign, map }), selectedEntityId: null, activeAssetId: null }));
         get().addEvent("map.replaced", summary, { mapId: map.id, theme: map.theme, entityCount: map.entities.length });
       },
+      commitSharedWorld: (world,map) => {
+        set(state=>{const current=snapshotActiveScene(state.campaign),scene=makeCampaignScene(map.name,map,current.characters.map(c=>c.id),'Shared world'),archivedWorlds=current.world&&current.world.id!==world.id?[...(current.archivedWorlds??[]).filter(w=>w.id!==current.world!.id),current.world]:current.archivedWorlds;return {campaign:touchCampaign({...current,world,archivedWorlds,map:scene.map,activeLocationId:map.locationId,activeSceneId:scene.id,scenes:[...(current.scenes??[]),scene]}),selectedEntityId:null,activeAssetId:null};});
+      },
       installGeneratedCampaign: (plan, world, map) => {
         const scene = makeCampaignScene(map.name, map, get().campaign.characters.map((character) => character.id), plan.incitingIncident);
         set((state) => ({
@@ -447,7 +458,8 @@ export const useCampaignStore = create<CampaignStore>()(
             world,
             activeLocationId: map.locationId ?? world.locations[0]?.id,
             map: scene.map,
-            scenes: [scene],
+            scenes: [...(snapshotActiveScene(state.campaign).scenes??[]),scene],
+            archivedWorlds:state.campaign.world?[...(state.campaign.archivedWorlds??[]),state.campaign.world]:state.campaign.archivedWorlds,
             activeSceneId: scene.id,
             storyThreads: plan.acts.map((act) => ({
               id: act.id,
@@ -636,7 +648,10 @@ export const useCampaignStore = create<CampaignStore>()(
         const current = snapshotActiveScene(get().campaign);
         const target = current.scenes?.find((scene) => scene.id === id);
         if (!target) return false;
-        set({ campaign: touchCampaign({ ...current, activeSceneId: id, activeLocationId: target.map.locationId, map: structuredClone(target.map) }), selectedEntityId: null, activeAssetId: null });
+        const targetWorldId=target.map.world?.sharedWorld?.id??target.map.journey?.worldId;
+        const targetWorld=[current.world,...(current.archivedWorlds??[])].find(w=>w?.id===targetWorldId);
+        const context=targetWorld&&targetWorld.id!==current.world?.id?{...current,world:targetWorld,archivedWorlds:[...(current.archivedWorlds??[]).filter(w=>w.id!==targetWorld.id),...(current.world?[current.world]:[])]}:current;
+        set({ campaign: touchCampaign({ ...context, activeSceneId: id, activeLocationId: target.map.locationId, map: refreshSharedMap(structuredClone(target.map),context) }), selectedEntityId: null, activeAssetId: null });
         get().addEvent("scene.switched", `Switched to ${target.name}`, { sceneId: id, partyCharacterIds: target.partyCharacterIds });
         return true;
       },
@@ -668,7 +683,7 @@ export const useCampaignStore = create<CampaignStore>()(
     }),
     {
       name: "dndrom-campaign-v1",
-      version: 9,
+      version: 10,
       migrate: (persistedState) => {
         const persisted = persistedState as { campaign?: Campaign; campaignLibrary?: Campaign[]; miniatureLibrary?: TokenAsset[]; diceThemeLibrary?: DiceTheme[]; propLibrary?: PropAsset[]; materialLibrary?: MaterialAsset[]; basePlateLibrary?: BasePlateAsset[]; sceneLibrary?: SceneTemplateAsset[] };
         if (!persisted.campaign) return persistedState as CampaignStore;
@@ -696,6 +711,9 @@ export const useCampaignStore = create<CampaignStore>()(
         } as CampaignStore;
       },
       partialize: (state) => ({ campaign: state.campaign, campaignLibrary: state.campaignLibrary, miniatureLibrary: state.miniatureLibrary, diceThemeLibrary: state.diceThemeLibrary, propLibrary: state.propLibrary, materialLibrary: state.materialLibrary, basePlateLibrary: state.basePlateLibrary, sceneLibrary: state.sceneLibrary, mode: state.mode, panelTab: state.panelTab, lastSavedAt: state.lastSavedAt }),
+      storage: createJSONStorage(browserCampaignStorage),
+      onRehydrateStorage: () => (_state, error) => { if (error) reportCampaignPersistenceError(error); },
     },
   ),
 );
+
